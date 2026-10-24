@@ -1,0 +1,150 @@
+// Prisma schema for the Digital Invoicing System (Microsoft SQL Server).
+//
+// The datasource URL is supplied by prisma.config.js via DATABASE_URL.
+// Existing tables are preserved; migrations add new tables without resetting the database.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlserver"
+}
+
+model User {
+  id Int @id @default(autoincrement())
+
+  /// Display name of the account owner.
+  fullName String @db.NVarChar(200)
+
+  /// Unique, always stored lower-cased and trimmed.
+  /// The database collation is case-insensitive, so the unique index
+  /// also prevents duplicates that differ only by letter case.
+  email String @unique @db.NVarChar(320)
+
+  /// bcrypt hash. Plain-text passwords are never stored.
+  passwordHash String @db.NVarChar(255)
+
+  createdAt DateTime @default(now()) @db.DateTime2
+  updatedAt DateTime @updatedAt @db.DateTime2
+
+  customers Customer[]
+  products  Product[]
+  invoices  Invoice[]
+
+  @@map("Users")
+}
+
+model Invoice {
+  id            Int       @id @default(autoincrement())
+  userId        Int
+  invoiceNumber String    @unique @db.NVarChar(30)
+  customerId    Int
+  invoiceDate   DateTime  @db.Date
+  dueDate       DateTime? @db.Date
+  status        String    @default("draft") @db.NVarChar(20)
+  subtotal      Decimal   @default(0) @db.Decimal(18, 2)
+  taxTotal      Decimal   @default(0) @db.Decimal(18, 2)
+  grandTotal    Decimal   @default(0) @db.Decimal(18, 2)
+  notes         String?   @db.NVarChar(2000)
+  paidAt        DateTime? @db.DateTime2
+  createdAt     DateTime  @default(now()) @db.DateTime2
+  updatedAt     DateTime  @updatedAt @db.DateTime2
+
+  user     User          @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  customer Customer      @relation(fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  items    InvoiceItem[]
+
+  @@index([userId, createdAt])
+  @@index([userId, status])
+  @@index([userId, customerId])
+  @@index([userId, invoiceDate])
+  @@map("Invoices")
+}
+
+model InvoiceItem {
+  id           Int     @id @default(autoincrement())
+  invoiceId    Int
+  productId    Int?
+  productName  String  @db.NVarChar(200)
+  productCode  String? @db.NVarChar(50)
+  quantity     Int
+  unitPrice    Decimal @db.Decimal(18, 2)
+  taxRate      Decimal @db.Decimal(5, 2)
+  lineSubtotal Decimal @db.Decimal(18, 2)
+  lineTax      Decimal @db.Decimal(18, 2)
+  lineTotal    Decimal @db.Decimal(18, 2)
+
+  invoice Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  product Product? @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([invoiceId])
+  @@index([productId])
+  @@map("InvoiceItems")
+}
+
+model InvoiceCounter {
+  id        Int @id
+  nextValue Int
+
+  @@map("InvoiceCounters")
+}
+
+model Customer {
+  id           Int      @id @default(autoincrement())
+  userId       Int
+  name         String   @db.NVarChar(200)
+  email        String?  @db.NVarChar(320)
+  phone        String?  @db.NVarChar(50)
+  companyName  String?  @db.NVarChar(200)
+  taxNumber    String?  @db.NVarChar(100)
+  registration String?  @db.NVarChar(30)
+  address      String?  @db.NVarChar(500)
+  city         String?  @db.NVarChar(100)
+  notes        String?  @db.NVarChar(Max)
+  createdAt    DateTime @default(now()) @db.DateTime2
+  updatedAt    DateTime @updatedAt @db.DateTime2
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: NoAction)
+  invoices Invoice[]
+
+  @@index([userId, createdAt])
+  @@index([userId, city])
+  @@index([userId, name])
+  @@index([userId, companyName])
+  @@map("Customers")
+}
+
+model Product {
+  id            Int      @id @default(autoincrement())
+  userId        Int
+  name          String   @db.NVarChar(200)
+
+  /// Normalised to trimmed upper-case, so "sku-1" and "SKU-1" are one code.
+  /// Unique per owner; the database collation is case-insensitive as well.
+  code          String   @db.NVarChar(50)
+
+  description   String?  @db.NVarChar(Max)
+  unit          String?  @db.NVarChar(30)
+
+  /// Money is stored as an exact decimal, never a floating-point type.
+  price         Decimal  @db.Decimal(18, 2)
+
+  /// Percentage of tax applied to this product, 0-100.
+  taxRate       Decimal  @default(0) @db.Decimal(5, 2)
+  stockQuantity Int      @default(0)
+  isActive      Boolean  @default(true)
+
+  createdAt     DateTime @default(now()) @db.DateTime2
+  updatedAt     DateTime @updatedAt @db.DateTime2
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: NoAction)
+  invoiceItems InvoiceItem[]
+
+  @@unique([userId, code])
+  @@index([userId, createdAt])
+  @@index([userId, isActive])
+  @@index([userId, unit])
+  @@index([userId, name])
+  @@map("Products")
+}

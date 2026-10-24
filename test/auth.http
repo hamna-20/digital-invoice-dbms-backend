@@ -1,0 +1,116 @@
+### Digital Invoicing API - Authentication
+### Open this file with VS Code "REST Client" or import into Postman.
+### Start the server first: npm run dev
+
+@baseUrl = http://localhost:5000
+@email = hamna.ali@example.com
+@password = StrongPass!23
+
+### Health check
+GET {{baseUrl}}/api/health
+
+### 1. Signup - success (201)
+POST {{baseUrl}}/api/auth/signup
+Content-Type: application/json
+
+{
+  "fullName": "Hamna Ali",
+  "email": "{{email}}",
+  "password": "{{password}}",
+  "confirmPassword": "{{password}}"
+}
+
+### 2. Signup - duplicate email (409)
+POST {{baseUrl}}/api/auth/signup
+Content-Type: application/json
+
+{
+  "fullName": "Hamna Ali",
+  "email": "{{email}}",
+  "password": "{{password}}",
+  "confirmPassword": "{{password}}"
+}
+
+### 3. Signup - invalid email (400)
+POST {{baseUrl}}/api/auth/signup
+Content-Type: application/json
+
+{
+  "fullName": "Bad Email",
+  "email": "not-an-email",
+  "password": "{{password}}",
+  "confirmPassword": "{{password}}"
+}
+
+### 4. Signup - missing required fields (400)
+POST {{baseUrl}}/api/auth/signup
+Content-Type: application/json
+
+{}
+
+### 5. Signup - password mismatch (400)
+POST {{baseUrl}}/api/auth/signup
+Content-Type: application/json
+
+{
+  "fullName": "Mismatch User",
+  "email": "mismatch@example.com",
+  "password": "{{password}}",
+  "confirmPassword": "DifferentPass!23"
+}
+
+### 6. Signup - password too short (400)
+POST {{baseUrl}}/api/auth/signup
+Content-Type: application/json
+
+{
+  "fullName": "Short Password",
+  "email": "short@example.com",
+  "password": "Short1!",
+  "confirmPassword": "Short1!"
+}
+
+### 7. Signin - success (200) -> copy data.token into @token below
+# @name signin
+POST {{baseUrl}}/api/auth/signin
+Content-Type: application/json
+
+{
+  "email": "{{email}}",
+  "password": "{{password}}"
+}
+
+### 8. Signin - wrong password (401, generic message)
+POST {{baseUrl}}/api/auth/signin
+Content-Type: application/json
+
+{
+  "email": "{{email}}",
+  "password": "WrongPass!23"
+}
+
+### 9. Signin - unknown email (401, same generic message)
+POST {{baseUrl}}/api/auth/signin
+Content-Type: application/json
+
+{
+  "email": "nobody@example.com",
+  "password": "{{password}}"
+}
+
+### 10. Invalid JSON body (400)
+POST {{baseUrl}}/api/auth/signup
+Content-Type: application/json
+
+{"fullName": "Broken",
+
+### 11. Verify token / current user (200) - paste a real token below
+@token = paste-token-from-request-7-here
+GET {{baseUrl}}/api/auth/me
+Authorization: Bearer {{token}}
+
+### 12. Missing Authorization header (401)
+GET {{baseUrl}}/api/auth/me
+
+### 13. Unknown route (404)
+GET {{baseUrl}}/api/does-not-exist
