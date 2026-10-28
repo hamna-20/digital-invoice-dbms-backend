@@ -14,6 +14,8 @@ import {
     percentageChange,
     toDateOnly,
 } from '../utils/reporting.js';
+import { settlementFromRows, settlementSelect } from './settlement.service.js';
+import { toAmount } from '../utils/money.js';
 
 /**
  * Dashboard summary.
@@ -55,7 +57,12 @@ function bucket(buckets, status) {
 
 export async function getSummary(userId, now = new Date()) {
     const periods = dashboardPeriods(now);
-    const [monthGroups, previousAggregate, yearGroups, allTimeGroups, recent, topGroups, financialInvoices] =
+    const billedNotDraftCancelledVoid = { status: { notIn: ['draft', 'cancelled', 'void'] } };
+    const currentMonthFilter = {
+        invoiceDate: { gte: periods.currentMonthStart, lt: periods.nextMonthStart },
+    };
+
+    const [monthGroups, previousAggregate, yearGroups, allTimeGroups, recent, topGroups, financialInvoices, settlementInvoicesCurrentMonth] =
         await Promise.all([
             prisma.invoice.groupBy({
                 by: ['status'],
@@ -130,6 +137,14 @@ export async function getSummary(userId, now = new Date()) {
                     creditNotes: { select: { appliedAmount: true, totalAmount: true, taxTotal: true } },
                 },
             }),
+            prisma.invoice.findMany({
+                where: {
+                    userId,
+                    ...billedNotDraftCancelledVoid,
+                    ...currentMonthFilter,
+                },
+                select: settlementSelect(),
+            }),
         ]);
 
     const month = statusBuckets(monthGroups);
@@ -158,6 +173,27 @@ export async function getSummary(userId, now = new Date()) {
     const previousMonthSales = money(previousAggregate._sum?.grandTotal ?? 0);
     const currentYearSales = money(yearIssued.grandTotal.add(yearPartial.grandTotal).add(yearPaid.grandTotal));
     const allTimeSales = money(allTimeIssued.grandTotal.add(allTimePartial.grandTotal).add(allTimePaid.grandTotal));
+
+    // Settlement-based figures for billed invoices (status not in draft/cancelled/void)
+    // Current-month logic is month-based: apply same month filter as current month cards
+    // Filter: invoiceDate >= periods.currentMonthStart and < periods.nextMonthStart
+    let collectedPaisa = 0;
+    let billedNetPaisa = 0;
+    let outstandingPaisa = 0;
+    for (const inv of settlementInvoicesCurrentMonth) {
+        const settlement = settlementFromRows(inv);
+        collectedPaisa += settlement.paidPaisa;
+        billedNetPaisa += settlement.effectiveTotalPaisa;
+        outstandingPaisa += settlement.unpaidPaisa;
+    }
+    const totals = {
+        collected: toAmount(collectedPaisa),
+        collectedPaisa,
+        billedNet: toAmount(billedNetPaisa),
+        billedNetPaisa,
+        outstanding: toAmount(outstandingPaisa),
+        outstandingPaisa,
+    };
 
     const topProductIds = topGroups.map((group) => group.productId);
     const topNameGroups =
@@ -270,5 +306,6 @@ export async function getSummary(userId, now = new Date()) {
                 taxAmount: money(group._sum?.lineTax ?? 0),
             };
         }),
+        totals,
     };
 }

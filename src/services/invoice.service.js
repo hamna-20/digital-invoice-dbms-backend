@@ -290,6 +290,8 @@ function serializeInvoice(invoice, { returnCreditTransfers = new Map(), creditBa
         subtotal: toNumber(invoice.subtotal),
         taxTotal: toNumber(invoice.taxTotal),
         grandTotal: toNumber(invoice.grandTotal),
+        netTotal: toAmount(settlement.effectiveTotalPaisa),
+        netTotalPaisa: settlement.effectiveTotalPaisa,
         notes: invoice.notes,
         paidAt: invoice.paidAt,
         issuedAt: invoice.issuedAt ?? null,
