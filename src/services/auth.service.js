@@ -11,6 +11,7 @@ const publicUserSelect = {
     id: true,
     fullName: true,
     email: true,
+    role: true,
     createdAt: true,
 };
 
@@ -18,6 +19,7 @@ const toPublicUser = (user) => ({
     id: user.id,
     fullName: user.fullName,
     email: user.email,
+    role: user.role,
     createdAt: user.createdAt,
 });
 
@@ -82,6 +84,9 @@ export async function signin({ email, password }) {
         throw ApiError.unauthorized('Invalid email or password');
     }
 
+    // The token carries the identity only. The role is deliberately NOT put in
+    // the token: it is re-read from the database on every request by
+    // `loadActor`, so demoting an account takes effect immediately.
     const token = signAccessToken({
         sub: String(user.id),
         email: user.email,

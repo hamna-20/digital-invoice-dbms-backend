@@ -1,10 +1,11 @@
-import express from 'express';
+﻿import express from 'express';
 import authRoutes from './auth.routes.js';
 import customerRoutes from './customer.routes.js';
 import dashboardRoutes from './dashboard.routes.js';
 import invoiceRoutes from './invoice.routes.js';
 import productRoutes from './product.routes.js';
 import reportRoutes from './report.routes.js';
+import financialRoutes from './financial.routes.js';
 
 const router = express.Router();
 
@@ -30,5 +31,6 @@ router.use('/products', productRoutes);
 router.use('/invoices', invoiceRoutes);
 router.use('/reports', reportRoutes);
 router.use('/dashboard', dashboardRoutes);
+router.use('/', financialRoutes);
 
 export default router;

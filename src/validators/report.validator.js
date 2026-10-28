@@ -12,7 +12,15 @@
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const YEAR_PATTERN = /^\d{4}$/;
 
-export const REPORT_STATUSES = new Set(['draft', 'issued', 'overdue', 'paid', 'cancelled']);
+export const REPORT_STATUSES = new Set([
+    'draft',
+    'issued',
+    'partially_paid',
+    'overdue',
+    'paid',
+    'cancelled',
+    'void',
+]);
 
 const MAX_SEARCH_LENGTH = 200;
 const MAX_LIMIT = 100;
@@ -188,3 +196,137 @@ export function validateInvoiceHistoryQuery(query) {
 }
 
 export const REPORT_MAX_LIMIT = MAX_LIMIT;
+
+/* ------------------------------------------------------------------ *
+ * Financial status reports (returns, credits, voids, activity)
+ * ------------------------------------------------------------------ */
+
+const RETURN_REPORT_STATUSES = new Set(['pending', 'draft', 'approved', 'rejected', 'cancelled']);
+const CREDIT_ENTRY_TYPES = new Set(['credit_added', 'credit_applied', 'reversal_added', 'reversal_applied']);
+const DOCUMENT_TYPES = new Set([
+    'invoice',
+    'payment',
+    'return',
+    'credit_note',
+    'customer_credit',
+    'credit_application',
+    'user',
+]);
+
+function parsePositiveInt(query, field, errors) {
+    const input = query[field];
+    if (input === undefined || input === null || input === '') return undefined;
+    if (typeof input !== 'string' || !/^[1-9]\d*$/.test(input)) {
+        errors.push({ field, message: `${field} must be a positive integer` });
+        return undefined;
+    }
+    const value = Number(input);
+    if (!Number.isSafeInteger(value) || value > 2147483647) {
+        errors.push({ field, message: `${field} must be a positive integer` });
+        return undefined;
+    }
+    return value;
+}
+
+function parseChoice(query, field, choices, errors) {
+    const input = query[field];
+    if (input === undefined || input === null || input === '') return undefined;
+    if (typeof input !== 'string' || !choices.has(input)) {
+        errors.push({ field, message: `${field} must be one of: ${[...choices].join(', ')}` });
+        return undefined;
+    }
+    return input;
+}
+
+function parseText(query, field, maxLength, errors) {
+    const input = query[field];
+    if (input === undefined || input === null || input === '') return undefined;
+    if (typeof input !== 'string' || input.trim().length > maxLength) {
+        errors.push({ field, message: `${field} must be a string of at most ${maxLength} characters` });
+        return undefined;
+    }
+    return input.trim();
+}
+
+/**
+ * Shared filters for the financial status reports: a date range plus the
+ * document-specific filters each report needs. Unknown fields are rejected
+ * rather than ignored so a typo cannot silently return the wrong numbers.
+ */
+export function validateFinancialReportQuery(query) {
+    const errors = [];
+    const value = { page: DEFAULT_PAGE, limit: DEFAULT_LIMIT };
+    const allowed = new Set([
+        'page',
+        'limit',
+        'startDate',
+        'endDate',
+        'customerId',
+        'invoiceNumber',
+        'returnStatus',
+        'creditStatus',
+        'entryType',
+        'reference',
+        'action',
+        'documentType',
+        'userId',
+    ]);
+
+    if (!isObject(query)) {
+        return { errors: [{ field: 'query', message: 'Query must be an object' }], value };
+    }
+    for (const field of Object.keys(query)) {
+        if (!allowed.has(field)) errors.push({ field, message: 'Filter field is not supported' });
+    }
+
+    value.page = parsePage(query, errors);
+    value.limit = parseLimit(query, errors);
+
+    if (query.startDate !== undefined) {
+        const date = parseDateOnly('startDate', query.startDate, 'Start date', errors);
+        if (date) value.startDate = date;
+    }
+    if (query.endDate !== undefined) {
+        const date = parseDateOnly('endDate', query.endDate, 'End date', errors);
+        if (date) value.endDate = date;
+    }
+    if (value.startDate && value.endDate && value.endDate < value.startDate) {
+        errors.push({ field: 'endDate', message: 'End date must be on or after start date' });
+    }
+
+    const customerId = parsePositiveInt(query, 'customerId', errors);
+    if (customerId) value.customerId = customerId;
+
+    const invoiceNumber = parseText(query, 'invoiceNumber', 40, errors);
+    if (invoiceNumber) value.invoiceNumber = invoiceNumber;
+
+    const reference = parseText(query, 'reference', 100, errors);
+    if (reference) value.reference = reference;
+
+    const action = parseText(query, 'action', 60, errors);
+    if (action) value.action = action;
+
+    const userId = parsePositiveInt(query, 'userId', errors);
+    if (userId) value.userId = userId;
+
+    const returnStatus = parseChoice(query, 'returnStatus', RETURN_REPORT_STATUSES, errors);
+    if (returnStatus) value.returnStatus = returnStatus;
+
+    const entryType = parseChoice(query, 'entryType', CREDIT_ENTRY_TYPES, errors);
+    if (entryType) value.entryType = entryType;
+
+    const documentType = parseChoice(query, 'documentType', DOCUMENT_TYPES, errors);
+    if (documentType) value.documentType = documentType;
+
+    // creditStatus is validated by the caller of the status report; accept the
+    // documented vocabulary here so the query string round-trips cleanly.
+    const creditStatus = parseChoice(
+        query,
+        'creditStatus',
+        new Set(['unsettled', 'partially_settled', 'settled']),
+        errors
+    );
+    if (creditStatus) value.creditStatus = creditStatus;
+
+    return { errors, value };
+}

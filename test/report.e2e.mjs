@@ -18,6 +18,7 @@ const stamp = Date.now();
 const password = 'StrongPass!23';
 const ownerEmail = `test.report.${stamp}@example.test`;
 const otherEmail = `test.report.other.${stamp}@example.test`;
+const productCode = (offset) => String((stamp + offset) % 1_000_000).padStart(6, '0');
 const results = [];
 
 let ownerId;
@@ -140,28 +141,28 @@ async function run() {
 
         const productOne = await createProduct(token, {
             name: `Report Product One ${stamp}`,
-            code: `RP1-${stamp}`,
+            code: productCode(1),
             price: 100,
             taxRate: 10,
             stockQuantity: 1000,
         });
         const productTwo = await createProduct(token, {
             name: `Report Product Two ${stamp}`,
-            code: `RP2-${stamp}`,
+            code: productCode(2),
             price: 50,
             taxRate: 5,
             stockQuantity: 1000,
         });
         const productThree = await createProduct(token, {
             name: `Report Product Three ${stamp}`,
-            code: `RP3-${stamp}`,
+            code: productCode(3),
             price: 50,
             taxRate: 0,
             stockQuantity: 1000,
         });
         const otherProduct = await createProduct(otherToken, {
             name: `Other Report Product ${stamp}`,
-            code: `ORP-${stamp}`,
+            code: productCode(4),
             price: 100,
             taxRate: 10,
             stockQuantity: 100,
@@ -560,6 +561,10 @@ async function run() {
     } finally {
         for (const id of [ownerId, otherId]) {
             if (!Number.isSafeInteger(id)) continue;
+            await prisma.creditNote.deleteMany({ where: { invoice: { userId: id } } }).catch(() => {});
+            await prisma.invoiceReturn.deleteMany({ where: { invoice: { userId: id } } }).catch(() => {});
+            await prisma.payment.deleteMany({ where: { invoice: { userId: id } } }).catch(() => {});
+            await prisma.invoiceActivity.deleteMany({ where: { invoice: { userId: id } } }).catch(() => {});
             await prisma.invoice.deleteMany({ where: { userId: id } }).catch(() => {});
             await prisma.product.deleteMany({ where: { userId: id } }).catch(() => {});
             await prisma.customer.deleteMany({ where: { userId: id } }).catch(() => {});

@@ -12,7 +12,8 @@
     "prisma:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
     "seed:demo": "node scripts/seed-demo-tax-rates.mjs",
-    "test": "node test/auth.e2e.mjs && node test/customer.e2e.mjs && node test/product.e2e.mjs && node test/invoice.e2e.mjs && node test/report.e2e.mjs && node test/dashboard.e2e.mjs"
+    "set-role": "node scripts/set-role.mjs",
+    "test": "node test/auth.e2e.mjs && node test/customer.e2e.mjs && node test/product.e2e.mjs && node test/invoice.e2e.mjs && node test/return-settlement.e2e.mjs && node test/report.e2e.mjs && node test/dashboard.e2e.mjs"
   },
   "keywords": [],
   "author": "",

@@ -13,7 +13,7 @@ const CREATE_FIELDS = new Set(['customerId', 'invoiceDate', 'dueDate', 'notes', 
 const ITEM_FIELDS = new Set(['productId', 'quantity']);
 const QUERY_FIELDS = new Set(['page', 'limit', 'search', 'status', 'customerId', 'from', 'to']);
 
-const STATUSES = new Set(['draft', 'issued', 'paid', 'overdue', 'cancelled']);
+const STATUSES = new Set(['draft', 'issued', 'partially_paid', 'paid', 'overdue', 'cancelled', 'void']);
 const DRAFT_STATUS = 'draft';
 
 const MAX_LINES = 100;
@@ -27,6 +27,13 @@ const DEFAULT_PAGE = 1;
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+/** Parses a YYYY-MM-DD string into a UTC date, or null when it is not one. */
+function validDate(value) {
+    if (typeof value !== 'string' || !DATE_PATTERN.test(value)) return null;
+    const date = new Date(`${value}T00:00:00.000Z`);
+    return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value ? date : null;
+}
 const isBlank = (input) =>
     input === undefined || input === null || (typeof input === 'string' && input.trim() === '');
 
@@ -328,14 +335,33 @@ export function validateInvoiceListQuery(query) {
         }
     }
 
-    if (source.status !== undefined) {
-        if (typeof source.status !== 'string' || !STATUSES.has(source.status)) {
+    if (source.status !== undefined && source.status !== null && source.status !== '') {
+        if (typeof source.status !== 'string') {
             errors.push({
                 field: 'status',
                 message: `Must be one of: ${[...STATUSES].join(', ')}`,
             });
         } else {
-            value.status = source.status;
+            // "All" means no filter; otherwise a single status or a comma
+            // separated list of them (an invoice may match several at once).
+            const requested = [
+                ...new Set(
+                    source.status
+                        .split(',')
+                        .map((entry) => entry.trim().toLowerCase())
+                        .filter(Boolean)
+                ),
+            ];
+            const unknown = requested.filter((entry) => entry !== 'all' && !STATUSES.has(entry));
+            if (unknown.length > 0) {
+                errors.push({
+                    field: 'status',
+                    message: `Must be one of: ${[...STATUSES].join(', ')}`,
+                });
+            } else {
+                const selected = requested.filter((entry) => entry !== 'all');
+                if (selected.length > 0) value.status = selected;
+            }
         }
     }
 
@@ -369,5 +395,158 @@ export function validateInvoiceId(input) {
     return { errors: [], value: id };
 }
 
+
+export function validateInvoicePayment(body) {
+    const errors = [];
+    const value = {};
+    const allowed = new Set([
+        'amount',
+        'paidAmount',
+        'paymentDate',
+        'method',
+        'reference',
+        'notes',
+        'creditAmount',
+        'creditReason',
+        'reason',
+        'idempotencyKey',
+        'expectedVersion',
+    ]);
+
+    if (!isObject(body)) {
+        return { errors: [{ field: 'body', message: 'Request body must be a JSON object' }], value };
+    }
+    for (const field of Object.keys(body)) {
+        if (!allowed.has(field)) errors.push({ field, message: 'Field is not supported' });
+    }
+
+    /** Non-negative money with at most two decimals, returned as a fixed string. */
+    const parseMoney = (field, input, label) => {
+        if (input === undefined || input === null || input === '') return null;
+        const num = typeof input === 'string' ? (input.trim() === '' ? NaN : Number(input)) : input;
+        if (typeof num !== 'number' || !Number.isFinite(num) || num < 0) {
+            errors.push({ field, message: `${label} must be a non-negative number` });
+            return null;
+        }
+        if (!/^\d{1,16}(?:\.\d{1,2})?$/.test(String(num))) {
+            errors.push({ field, message: `${label} must have no more than two decimal places` });
+            return null;
+        }
+        return num.toFixed(2);
+    };
+
+    const amount = parseMoney('amount', body.amount !== undefined ? body.amount : body.paidAmount, 'Amount');
+    const creditAmount = parseMoney('creditAmount', body.creditAmount, 'Credit amount');
+    value.amount = amount ?? '0.00';
+    if (creditAmount !== null) value.creditAmount = creditAmount;
+
+    const reasonInput = body.creditReason !== undefined ? body.creditReason : body.reason;
+    let creditReason = null;
+    if (reasonInput !== undefined && reasonInput !== null && reasonInput !== '') {
+        if (typeof reasonInput !== 'string') {
+            errors.push({ field: 'creditReason', message: 'Credit reason must be a string' });
+        } else if (reasonInput.trim().length > 500) {
+            errors.push({ field: 'creditReason', message: 'Credit reason must be at most 500 characters' });
+        } else {
+            creditReason = reasonInput.trim() || null;
+        }
+    }
+    if (creditReason) value.creditReason = creditReason;
+
+    if (Number(creditAmount ?? 0) > 0 && !creditReason) {
+        errors.push({ field: 'creditReason', message: 'Reason is required when a credit amount is entered' });
+    }
+    if (Number(value.amount) <= 0 && Number(creditAmount ?? 0) <= 0) {
+        errors.push({ field: 'amount', message: 'Enter a paid amount or a credit amount greater than zero' });
+    }
+
+    if (body.idempotencyKey !== undefined && body.idempotencyKey !== null && body.idempotencyKey !== '') {
+        const key = typeof body.idempotencyKey === 'string' ? body.idempotencyKey.trim() : '';
+        // The service prefixes the invoice id, so keep the total under NVARCHAR(120).
+        if (!key || key.length > 100) {
+            errors.push({ field: 'idempotencyKey', message: 'Idempotency key must be 1 to 100 characters' });
+        } else {
+            value.idempotencyKey = key;
+        }
+    }
+
+    if (body.expectedVersion !== undefined && body.expectedVersion !== null && body.expectedVersion !== '') {
+        const version = typeof body.expectedVersion === 'string' ? Number(body.expectedVersion) : body.expectedVersion;
+        if (!Number.isSafeInteger(version) || version < 0) {
+            errors.push({ field: 'expectedVersion', message: 'Expected version must be a non-negative whole number' });
+        } else {
+            value.expectedVersion = version;
+        }
+    }
+
+    if (body.paymentDate === undefined || body.paymentDate === null || body.paymentDate === '') {
+        value.paymentDate = new Date();
+    } else {
+        const date = validDate(body.paymentDate);
+        if (!date) errors.push({ field: 'paymentDate', message: 'Payment date must be a valid YYYY-MM-DD date' });
+        else value.paymentDate = date;
+    }
+
+    const methods = new Set(['cash', 'bank_transfer', 'cheque', 'other']);
+    if (body.method !== undefined && body.method !== null && body.method !== '') {
+        if (typeof body.method !== 'string' || !methods.has(body.method)) {
+            errors.push({ field: 'method', message: `Method must be one of: ${[...methods].join(', ')}` });
+        } else {
+            value.method = body.method;
+        }
+    }
+
+    for (const field of ['reference', 'notes']) {
+        if (body[field] === undefined || body[field] === null || body[field] === '') continue;
+        const maximum = field === 'reference' ? 100 : 1000;
+        if (typeof body[field] !== 'string' || body[field].trim().length > maximum) {
+            errors.push({ field, message: `Must be a string of at most ${maximum} characters` });
+        } else {
+            value[field] = body[field].trim();
+        }
+    }
+
+    return { errors, value };
+}
+
 export const INVOICE_STATUSES = Object.freeze([...STATUSES]);
 export const DRAFT_INVOICE_STATUS = DRAFT_STATUS;
+
+/**
+ * Voiding requires a reason, the void date and the invoice number typed back
+ * exactly, so it cannot be triggered by a stray click or a replayed request.
+ */
+export function validateVoidInvoice(body) {
+    const errors = [];
+    const value = {};
+    const allowed = new Set(['reason', 'voidDate', 'confirmNumber']);
+
+    if (!isObject(body)) {
+        return { errors: [{ field: 'body', message: 'Request body must be a JSON object' }], value };
+    }
+    for (const field of Object.keys(body)) {
+        if (!allowed.has(field)) errors.push({ field, message: 'Field is not supported' });
+    }
+
+    if (typeof body.reason !== 'string' || !body.reason.trim() || body.reason.trim().length > 500) {
+        errors.push({ field: 'reason', message: 'A void reason is required and must be at most 500 characters' });
+    } else {
+        value.reason = body.reason.trim();
+    }
+
+    if (body.voidDate === undefined || body.voidDate === null || body.voidDate === '') {
+        value.voidDate = new Date();
+    } else {
+        const date = validDate(body.voidDate);
+        if (!date) errors.push({ field: 'voidDate', message: 'Void date must be a valid YYYY-MM-DD date' });
+        else value.voidDate = date;
+    }
+
+    if (typeof body.confirmNumber !== 'string' || !body.confirmNumber.trim()) {
+        errors.push({ field: 'confirmNumber', message: 'Type the invoice number exactly to confirm the void' });
+    } else {
+        value.confirmNumber = body.confirmNumber.trim();
+    }
+
+    return { errors, value };
+}

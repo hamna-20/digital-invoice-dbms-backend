@@ -10,6 +10,7 @@ const stamp = Date.now();
 const password = 'StrongPass!23';
 const ownerEmail = `test.invoice.${stamp}@example.test`;
 const otherEmail = `test.invoice.other.${stamp}@example.test`;
+const productCode = (offset) => String((stamp + offset) % 1_000_000).padStart(6, '0');
 const results = [];
 let ownerId;
 let otherId;
@@ -119,7 +120,7 @@ async function run() {
 
         const createdA = await createProduct(token, {
             name: 'Widget A',
-            code: `INV-A-${stamp}`,
+            code: productCode(1),
             price: 33.33,
             taxRate: 17.5,
             stockQuantity: 1000,
@@ -128,7 +129,7 @@ async function run() {
 
         const createdB = await createProduct(token, {
             name: 'Widget B',
-            code: `INV-B-${stamp}`,
+            code: productCode(2),
             price: 10,
             taxRate: 10,
             stockQuantity: 1000,
@@ -138,7 +139,7 @@ async function run() {
         productPenny = (
             await createProduct(token, {
                 name: 'Penny Line',
-                code: `INV-P-${stamp}`,
+                code: productCode(3),
                 price: 0.05,
                 taxRate: 10,
                 stockQuantity: 1000,
@@ -148,7 +149,7 @@ async function run() {
         productSnapshot = (
             await createProduct(token, {
                 name: 'Snapshot Widget',
-                code: `INV-S-${stamp}`,
+                code: productCode(4),
                 price: 500,
                 taxRate: 18,
                 stockQuantity: 1000,
@@ -158,7 +159,7 @@ async function run() {
         productInactive = (
             await createProduct(token, {
                 name: 'Inactive Widget',
-                code: `INV-X-${stamp}`,
+                code: productCode(5),
                 price: 5,
                 taxRate: 0,
                 stockQuantity: 10,
@@ -169,7 +170,7 @@ async function run() {
         productLowStock = (
             await createProduct(token, {
                 name: 'Low Stock Widget',
-                code: `INV-L-${stamp}`,
+                code: productCode(6),
                 price: 7,
                 taxRate: 0,
                 stockQuantity: 2,
@@ -179,7 +180,7 @@ async function run() {
         otherProduct = (
             await createProduct(otherToken, {
                 name: 'Other User Widget',
-                code: `INV-O-${stamp}`,
+                code: productCode(7),
                 price: 1,
                 taxRate: 0,
             })
@@ -268,7 +269,7 @@ async function run() {
         check(
             'product snapshots are stored',
             mainInvoice?.items?.[0]?.productName === 'Widget A' &&
-                mainInvoice?.items?.[0]?.productCode === `INV-A-${stamp}`
+                mainInvoice?.items?.[0]?.productCode === productA.code
         );
         check(
             'response includes a safe customer summary',
@@ -461,9 +462,11 @@ async function run() {
         check('issuing an issued invoice returns 409', issuedAgain.status === 409, `status=${issuedAgain.status}`);
         const editIssued = await request('PUT', `/api/invoices/${mainInvoice.id}`, {
             token,
-            body: { notes: 'too late' },
+            body: { notes: 'Edited after issue' },
         });
-        check('editing an issued invoice returns 409', editIssued.status === 409, `status=${editIssued.status}`);
+        check('an issued invoice is still editable until it is paid',
+            editIssued.status === 200 && editIssued.json?.data?.invoice?.notes === 'Edited after issue',
+            `status=${editIssued.status}`);
 
         const emptyItemsDraft = await request('POST', '/api/invoices', {
             token,
@@ -485,7 +488,7 @@ async function run() {
         const stockProduct = (
             await createProduct(token, {
                 name: 'Stock Widget',
-                code: `INV-ST-${stamp}`,
+                code: productCode(8),
                 price: 1,
                 taxRate: 0,
                 stockQuantity: 10,
@@ -602,6 +605,136 @@ async function run() {
         const deletePaid = await request('DELETE', `/api/invoices/${mainInvoice.id}`, { token });
         check('deleting a paid invoice returns 409', deletePaid.status === 409, `status=${deletePaid.status}`);
 
+        const partialDraft = await request('POST', '/api/invoices', {
+            token,
+            body: {
+                customerId: customer.id,
+                invoiceDate: today,
+                items: [{ productId: productB.id, quantity: 1 }],
+            },
+        });
+        const partialId = partialDraft.json?.data?.invoice?.id;
+        const partialIssued = await request('PATCH', `/api/invoices/${partialId}/issue`, { token });
+        const firstPayment = await request('POST', `/api/invoices/${partialId}/payments`, {
+            token,
+            body: { amount: 4.25, paymentDate: today, method: 'cash' },
+        });
+        check(
+            'partial payment records the received amount and remaining balance',
+            partialIssued.status === 200 &&
+                firstPayment.status === 201 &&
+                firstPayment.json?.data?.invoice?.status === 'partially_paid' &&
+                firstPayment.json?.data?.invoice?.financialSummary?.amountPaid === 4.25 &&
+                firstPayment.json?.data?.invoice?.financialSummary?.outstanding === 6.75
+        );
+        const overpayment = await request('POST', `/api/invoices/${partialId}/payments`, {
+            token,
+            body: { amount: 6.76, paymentDate: today, method: 'cash' },
+        });
+        check('payment cannot exceed the outstanding balance', overpayment.status === 409, `status=${overpayment.status}`);
+        const finalPayment = await request('POST', `/api/invoices/${partialId}/payments`, {
+            token,
+            body: { amount: 6.75, paymentDate: today, method: 'bank_transfer', reference: 'FINAL' },
+        });
+        check(
+            'separate remaining payment settles the same invoice',
+            finalPayment.status === 201 &&
+                finalPayment.json?.data?.invoice?.status === 'paid' &&
+                finalPayment.json?.data?.invoice?.financialSummary?.outstanding === 0 &&
+                finalPayment.json?.data?.invoice?.payments?.length === 2
+        );
+
+        const returnInvoiceDraft = await request('POST', '/api/invoices', {
+            token,
+            body: {
+                customerId: customer.id,
+                invoiceDate: today,
+                items: [{ productId: productB.id, quantity: 2 }],
+            },
+        });
+        const returnInvoiceId = returnInvoiceDraft.json?.data?.invoice?.id;
+        const returnInvoiceIssued = await request('PATCH', `/api/invoices/${returnInvoiceId}/issue`, { token });
+        const soldItem = returnInvoiceIssued.json?.data?.invoice?.items?.[0];
+        const returnResponse = await request('POST', `/api/invoices/${returnInvoiceId}/returns`, {
+            token,
+            body: {
+                returnDate: today,
+                reason: 'One item returned in saleable condition',
+                items: [{ invoiceItemId: soldItem?.id, quantity: 1, disposition: 'saleable' }],
+            },
+        });
+        const returnRecord = returnResponse.json?.data?.return;
+        check(
+            'physical return is recorded separately and starts pending',
+            returnInvoiceIssued.status === 200 &&
+                returnResponse.status === 201 &&
+                returnRecord?.status === 'pending' &&
+                returnRecord?.totalAmount === 11
+        );
+        const creditBeforeReturn = await request('GET', `/api/customers/${customer.id}/credit`, { token });
+        const stockBeforeReturnApproval = await prisma.product.findUnique({
+            where: { id: productB.id },
+            select: { stockQuantity: true },
+        });
+        const returnApproved = await request(
+            'PATCH',
+            `/api/invoices/${returnInvoiceId}/returns/${returnRecord?.id}/approve`,
+            { token }
+        );
+        check('approved saleable return is persisted and has a return number',
+            returnApproved.status === 200 &&
+                returnApproved.json?.data?.return?.status === 'approved' &&
+                /^RET-\d+$/.test(returnApproved.json?.data?.return?.returnNumber || ''));
+        const approvedReturnInvoice = await request('GET', `/api/invoices/${returnInvoiceId}`, { token });
+        const creditAfterReturn = await request('GET', `/api/customers/${customer.id}/credit`, { token });
+        check('approved returned quantity appears on the invoice line',
+            returnApproved.json?.data?.return?.status === 'approved' &&
+                returnApproved.json?.data?.return?.returnNumber?.startsWith('RET-') &&
+                approvedReturnInvoice.json?.data?.invoice?.items?.[0]?.returnedQuantity === 1 &&
+                approvedReturnInvoice.json?.data?.invoice?.items?.[0]?.returnable === 1
+        );
+        // Saleable units are restocked exactly once, at approval.
+        const stockAfterReturnApproval = await prisma.product.findUnique({
+            where: { id: productB.id },
+            select: { stockQuantity: true },
+        });
+        check(
+            'approving a saleable return restocks the product',
+            stockAfterReturnApproval.stockQuantity === stockBeforeReturnApproval.stockQuantity + 1
+        );
+        check(
+            'approved return reduces the unpaid balance without touching customer credit',
+            creditAfterReturn.json?.data?.available === creditBeforeReturn.json?.data?.available &&
+                approvedReturnInvoice.json?.data?.invoice?.returns?.[0]?.creditPendingPaisa === 0 &&
+                approvedReturnInvoice.json?.data?.invoice?.financialSummary?.outstanding === 11 &&
+                approvedReturnInvoice.json?.data?.invoice?.financialSummary?.creditsApplied === 0
+        );
+        const duplicateReturnApproval = await request(
+            'PATCH',
+            `/api/invoices/${returnInvoiceId}/returns/${returnRecord?.id}/approve`,
+            { token }
+        );
+        check('an approved return cannot be approved again', duplicateReturnApproval.status === 409);
+        const overReturn = await request('POST', `/api/invoices/${returnInvoiceId}/returns`, {
+            token,
+            body: {
+                returnDate: today,
+                reason: 'Exceeds remaining sold quantity',
+                items: [{ invoiceItemId: soldItem?.id, quantity: 2, disposition: 'unsaleable' }],
+            },
+        });
+        check('return request rejects quantity above the original sale',
+            overReturn.status === 409, `status=${overReturn.status}`);
+
+        // A rejected return needs a reason; the endpoint refuses an empty one.
+        const rejectNoReason = await request(
+            'PATCH',
+            `/api/invoices/${returnInvoiceId}/returns/${returnRecord?.id}/reject`,
+            { token, body: {} }
+        );
+        check('rejecting a return without a reason returns 400',
+            rejectNoReason.status === 400, `status=${rejectNoReason.status}`);
+
         const payDraft = await request('POST', '/api/invoices', {
             token,
             body: {
@@ -625,6 +758,10 @@ async function run() {
             body: { notes: 'x' },
         });
         check('editing a cancelled invoice returns 409', editCancelled.status === 409, `status=${editCancelled.status}`);
+        const deleteCancelled = await request('DELETE', `/api/invoices/${payDraftId}`, { token });
+        check('cancelled invoice can be deleted', deleteCancelled.status === 204, `status=${deleteCancelled.status}`);
+        const deletedCancelledRead = await request('GET', `/api/invoices/${payDraftId}`, { token });
+        check('deleted cancelled invoice is no longer found', deletedCancelledRead.status === 404, `status=${deletedCancelledRead.status}`);
 
         // ------------------------------------------------------------- delete
         const deleteDraft = await request('POST', '/api/invoices', {
@@ -693,6 +830,15 @@ async function run() {
     } finally {
         for (const id of [ownerId, otherId]) {
             if (!Number.isSafeInteger(id)) continue;
+            await prisma.creditNote.deleteMany({ where: { invoice: { userId: id } } }).catch(() => {});
+            await prisma.creditApplication.deleteMany({ where: { customer: { userId: id } } }).catch(() => {});
+            await prisma.customerCreditEntry.deleteMany({ where: { customer: { userId: id } } }).catch(() => {});
+            await prisma.returnCredit.deleteMany({ where: { invoice: { userId: id } } }).catch(() => {});
+            await prisma.invoiceReturn.deleteMany({ where: { invoice: { userId: id } } }).catch(() => {});
+            await prisma.payment.deleteMany({
+                where: { invoice: { userId: id } },
+            }).catch(() => {});
+            await prisma.invoiceActivity.deleteMany({ where: { invoice: { userId: id } } }).catch(() => {});
             await prisma.invoice.deleteMany({ where: { userId: id } }).catch(() => {});
             await prisma.product.deleteMany({ where: { userId: id } }).catch(() => {});
             await prisma.customer.deleteMany({ where: { userId: id } }).catch(() => {});

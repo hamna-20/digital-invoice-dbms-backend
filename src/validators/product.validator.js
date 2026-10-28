@@ -8,7 +8,6 @@
 
 const TEXT_LIMITS = {
     name: 200,
-    code: 50,
     description: 4000,
     unit: 30,
 };
@@ -162,11 +161,9 @@ function validateProductBody(body, partial) {
         if (typeof body.code !== 'string' || !body.code.trim()) {
             errors.push({ field: 'code', message: 'Code is required and must not be empty' });
         } else {
-            // Codes are stored upper-case so a SKU is represented identically
-            // no matter how the client typed it.
             const code = collapseWhitespace(body.code).toUpperCase();
-            if (code.length > TEXT_LIMITS.code) {
-                errors.push({ field: 'code', message: `Code must be at most ${TEXT_LIMITS.code} characters` });
+            if (!/^\d{6}$/.test(code)) {
+                errors.push({ field: 'code', message: 'Code must be exactly 6 digits' });
             } else {
                 value.code = code;
             }

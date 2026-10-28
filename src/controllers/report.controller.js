@@ -9,6 +9,11 @@ function authenticatedUserId(req) {
     return userId;
 }
 
+/** Prefers the database-verified actor loaded by `loadActor`. */
+function actorId(req) {
+    return req.actor?.id ?? authenticatedUserId(req);
+}
+
 export async function summary(req, res) {
     const report = await reportService.getSummary(authenticatedUserId(req), req.validatedQuery);
     return res.status(200).json({ success: true, data: report });
@@ -41,5 +46,44 @@ export async function products(req, res) {
 
 export async function invoiceHistory(req, res) {
     const report = await reportService.getInvoiceHistory(authenticatedUserId(req), req.validatedQuery);
+    return res.status(200).json({ success: true, data: report });
+}
+
+/* ------------------------------------------------------------------ *
+ * Financial status reports
+ * ------------------------------------------------------------------ */
+
+export async function returnCreditStatus(req, res) {
+    const report = await reportService.getReturnsAndCreditsByStatus(actorId(req), req.validatedQuery);
+    return res.status(200).json({ success: true, data: report });
+}
+
+export async function salesTaxByRate(req, res) {
+    const report = await reportService.getSalesTaxByRate(actorId(req), req.validatedQuery);
+    return res.status(200).json({ success: true, data: report });
+}
+
+export async function receivables(req, res) {
+    const report = await reportService.getReceivables(actorId(req), req.validatedQuery);
+    return res.status(200).json({ success: true, data: report });
+}
+
+export async function voidedInvoices(req, res) {
+    const report = await reportService.getVoidedInvoices(actorId(req), req.validatedQuery);
+    return res.status(200).json({ success: true, data: report });
+}
+
+export async function returnsReport(req, res) {
+    const report = await reportService.getReturnsReport(actorId(req), req.validatedQuery);
+    return res.status(200).json({ success: true, data: report });
+}
+
+export async function customerCreditReport(req, res) {
+    const report = await reportService.getCustomerCreditReport(actorId(req), req.validatedQuery);
+    return res.status(200).json({ success: true, data: report });
+}
+
+export async function activityHistory(req, res) {
+    const report = await reportService.getActivityHistory(actorId(req), req.validatedQuery);
     return res.status(200).json({ success: true, data: report });
 }

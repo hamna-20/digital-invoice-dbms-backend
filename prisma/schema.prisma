@@ -2,6 +2,13 @@
 //
 // The datasource URL is supplied by prisma.config.js via DATABASE_URL.
 // Existing tables are preserved; migrations add new tables without resetting the database.
+//
+// Money storage policy
+// --------------------
+// Every monetary column is an exact SQL Server DECIMAL(18,2) - never a float
+// or real. All arithmetic happens in the application layer as *integer paisa*
+// (see src/utils/money.js), which is converted to/from these columns at the
+// persistence boundary using one documented ROUND_HALF_UP policy.
 
 generator client {
   provider = "prisma-client-js"
@@ -25,13 +32,28 @@ model User {
   /// bcrypt hash. Plain-text passwords are never stored.
   passwordHash String @db.NVarChar(255)
 
+  /// Authorization role. See src/utils/permissions.js for the permission map.
+  /// One of: sales | accounts | manager | admin
+  role String @default("sales") @db.NVarChar(20)
+
   createdAt DateTime @default(now()) @db.DateTime2
   updatedAt DateTime @updatedAt @db.DateTime2
 
   customers Customer[]
   products  Product[]
   invoices  Invoice[]
+  issuedInvoices Invoice[]        @relation("InvoiceIssuer")
+  voidedInvoices Invoice[]        @relation("InvoiceVoider")
+  invoiceActivities InvoiceActivity[]
+  payments Payment[]          @relation("PaymentCreator")
+  returnsCreated InvoiceReturn[]  @relation("ReturnCreator")
+  returnsApproved InvoiceReturn[] @relation("ReturnApprover")
+  returnCredits ReturnCredit[]    @relation("ReturnCreditApprover")
+  creditEntries CustomerCreditEntry[] @relation("CreditEntryCreator")
+  creditApplications CreditApplication[] @relation("CreditApplicationActor")
+  auditLogs AuditLog[]
 
+  @@index([role])
   @@map("Users")
 }
 
@@ -42,18 +64,52 @@ model Invoice {
   customerId    Int
   invoiceDate   DateTime  @db.Date
   dueDate       DateTime? @db.Date
+
+  /// Stored lifecycle state. The *effective* status (overdue etc.) and the
+  /// outstanding balance are always derived from payments/credits at read
+  /// time - this column is never written from a client-supplied value.
+  /// One of: draft | issued | partially_paid | paid | void
   status        String    @default("draft") @db.NVarChar(20)
+
   subtotal      Decimal   @default(0) @db.Decimal(18, 2)
   taxTotal      Decimal   @default(0) @db.Decimal(18, 2)
   grandTotal    Decimal   @default(0) @db.Decimal(18, 2)
   notes         String?   @db.NVarChar(2000)
   paidAt        DateTime? @db.DateTime2
+
+  /// Issue snapshot: when and by whom the draft became immutable.
+  issuedAt      DateTime? @db.DateTime2
+  issuedBy      Int?
+
+  /// Void audit trail. Voided invoices are retained forever and excluded
+  /// from sales totals; they are never deleted.
+  voidedAt      DateTime? @db.DateTime2
+  voidReason    String?   @db.NVarChar(500)
+  voidedBy      Int?
+
   createdAt     DateTime  @default(now()) @db.DateTime2
   updatedAt     DateTime  @updatedAt @db.DateTime2
 
+  /// Optimistic-concurrency token for money writes. Every financial mutation
+  /// (payment save, credit application, return approval, ...) increments it,
+  /// and "Record payment" sends the version it displayed so a stale save is
+  /// rejected with 409 instead of silently overwriting a concurrent edit.
+  version       Int       @default(0)
+
   user     User          @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  issuer   User?         @relation("InvoiceIssuer", fields: [issuedBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  voider   User?         @relation("InvoiceVoider", fields: [voidedBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
   customer Customer      @relation(fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   items    InvoiceItem[]
+  payments Payment[]
+  activities InvoiceActivity[]
+  returns InvoiceReturn[]
+  creditNotes CreditNote[]
+  returnCredits ReturnCredit[]
+  creditApplications CreditApplication[]
+  /// Credit ledger rows sourced from this invoice (issued / return credit / ...).
+  creditEntries CustomerCreditEntry[] @relation("CreditSourceInvoice")
+  stockMovements StockMovement[]
 
   @@index([userId, createdAt])
   @@index([userId, status])
@@ -78,9 +134,284 @@ model InvoiceItem {
   invoice Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   product Product? @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction)
 
+  returnItems InvoiceReturnItem[]
+
   @@index([invoiceId])
   @@index([productId])
   @@map("InvoiceItems")
+}
+
+/// A received payment. Only rows with status = 'completed' count as money
+/// received; pending/failed rows never reduce an invoice's outstanding balance.
+model Payment {
+  id            Int      @id @default(autoincrement())
+  invoiceId     Int
+  paymentDate   DateTime @db.Date
+  amount        Decimal  @db.Decimal(18, 2)
+
+  /// Optional: the UI does not require a payment method and the invoice PDF
+  /// never renders it.
+  method        String?  @db.NVarChar(30)
+  reference     String?  @db.NVarChar(100)
+  status        String   @default("completed") @db.NVarChar(20)
+  notes         String?   @db.NVarChar(1000)
+
+  /// Client-generated "Record payment" key. Replaying the same key inside a
+  /// locked transaction returns the original result instead of double-charging.
+  idempotencyKey String?  @db.NVarChar(120)
+
+  createdBy     Int?
+  createdAt     DateTime @default(now()) @db.DateTime2
+  updatedAt     DateTime @updatedAt @db.DateTime2
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  creator User?   @relation("PaymentCreator", fields: [createdBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([invoiceId, paymentDate])
+  @@index([invoiceId, status])
+  @@map("InvoicePayments")
+}
+
+/// Immutable per-invoice timeline entries (created/issued/payment/return/void).
+/// Cross-document history lives in AuditLogs.
+model InvoiceActivity {
+  id            Int      @id @default(autoincrement())
+  invoiceId     Int
+  actorId       Int
+  eventType     String   @db.NVarChar(50)
+  description   String   @db.NVarChar(500)
+  amount        Decimal? @db.Decimal(18, 2)
+  createdAt     DateTime @default(now()) @db.DateTime2
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  actor   User    @relation(fields: [actorId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([invoiceId, createdAt])
+  @@map("InvoiceActivities")
+}
+
+/// Status: draft | pending | approved | rejected | cancelled
+/// Only 'approved' settles value and stock. 'draft' and 'pending' reserve
+/// returnable quantity until they are decided.
+model InvoiceReturn {
+  id           Int      @id @default(autoincrement())
+  invoiceId    Int
+  customerId   Int
+  returnNumber String   @unique @db.NVarChar(40)
+  returnDate   DateTime @db.Date
+  reason       String   @db.NVarChar(500)
+  status       String   @default("draft") @db.NVarChar(20)
+  subtotal     Decimal  @db.Decimal(18, 2)
+  taxTotal     Decimal  @db.Decimal(18, 2)
+  totalAmount  Decimal  @db.Decimal(18, 2)
+  createdBy    Int
+  approvedBy   Int?
+  approvedAt   DateTime? @db.DateTime2
+  createdAt    DateTime  @default(now()) @db.DateTime2
+  updatedAt    DateTime  @updatedAt @db.DateTime2
+
+  invoice   Invoice            @relation(fields: [invoiceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  customer  Customer           @relation(fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  creator   User               @relation("ReturnCreator", fields: [createdBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  approver  User?              @relation("ReturnApprover", fields: [approvedBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  items     InvoiceReturnItem[]
+  credit    ReturnCredit?
+  creditNotes CreditNote[]
+  creditEntries CustomerCreditEntry[] @relation("CreditSourceReturn")
+  stockMovements StockMovement[]
+
+  @@index([invoiceId, returnDate])
+  @@index([invoiceId, status])
+  @@index([customerId])
+  @@map("InvoiceReturns")
+}
+
+model InvoiceReturnItem {
+  id            Int      @id @default(autoincrement())
+  returnId      Int
+  invoiceItemId Int
+  productId     Int?
+  productName   String   @db.NVarChar(200)
+  quantity      Int
+
+  /// 'saleable' returns are restocked on approval; 'unsaleable' are not.
+  disposition   String   @db.NVarChar(20)
+  unitPrice     Decimal  @db.Decimal(18, 2)
+  taxRate       Decimal  @db.Decimal(5, 2)
+  subtotal      Decimal  @db.Decimal(18, 2)
+  taxAmount     Decimal  @db.Decimal(18, 2)
+  totalAmount   Decimal  @db.Decimal(18, 2)
+
+  invoiceReturn InvoiceReturn  @relation(fields: [returnId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  invoiceItem   InvoiceItem    @relation(fields: [invoiceItemId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([returnId])
+  @@index([invoiceItemId])
+  @@map("InvoiceReturnItems")
+}
+
+/// A credit note raised against an invoice. When it originates from an
+/// approved return it is the persisted record of the "apply credit to the
+/// original invoice" settlement route: only appliedAmount counts towards the
+/// return credit's allocation.
+model CreditNote {
+  id            Int      @id @default(autoincrement())
+  invoiceId     Int
+  returnId      Int?     @unique
+  creditNumber  String   @unique @db.NVarChar(40)
+  issueDate     DateTime @db.Date
+  reason        String   @db.NVarChar(500)
+  subtotal      Decimal  @db.Decimal(18, 2)
+  taxTotal      Decimal  @db.Decimal(18, 2)
+  totalAmount   Decimal  @db.Decimal(18, 2)
+  appliedAmount Decimal  @default(0) @db.Decimal(18, 2)
+  status        String   @default("issued") @db.NVarChar(20)
+  createdAt     DateTime @default(now()) @db.DateTime2
+
+  invoice Invoice        @relation(fields: [invoiceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  return  InvoiceReturn? @relation(fields: [returnId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([invoiceId, issueDate])
+  @@map("CreditNotes")
+}
+
+/// Immutable per-customer credit ledger. The available balance is the signed
+/// sum of all rows (see CREDIT_ENTRY_EFFECT in settlement.service.js).
+///
+///   credit_added     +amount  granted manually or from a return (sourceReturnId)
+///   issued           +amount  credit issued from an invoice (sourceInvoiceId)
+///   return_credit    +amount  leftover return value kept as customer credit
+///   credit_applied   -amount  consumed by a CreditApplication on an invoice
+///   cashout          -amount  return credit paid out (reserved, not yet used)
+///
+/// A correction is NOT a separate type: it is a row of the same entryType with
+/// a negative amount and reversesEntryId pointing at the original row.
+/// Legacy reversal_added / reversal_applied rows remain readable.
+model ReturnCredit {
+  id             Int      @id @default(autoincrement())
+  returnId       Int      @unique
+  invoiceId      Int
+  customerId     Int
+  approvedAmount Decimal  @db.Decimal(18, 2)
+  approvedBy     Int?
+  approvedAt     DateTime @db.DateTime2
+  createdAt      DateTime @default(now()) @db.DateTime2
+  updatedAt      DateTime @updatedAt @db.DateTime2
+
+  return     InvoiceReturn @relation(fields: [returnId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  invoice    Invoice       @relation(fields: [invoiceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  customer   Customer      @relation(fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  approver   User?         @relation("ReturnCreditApprover", fields: [approvedBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([customerId])
+  @@index([invoiceId])
+  @@map("ReturnCredits")
+}
+
+/// Immutable per-customer credit ledger. The available balance is always
+/// Σ signed amounts and is recomputed inside transactions; there is no
+/// editable balance column.
+///
+///   credit_added     +amount  (approved return converted to customer credit)
+///   credit_applied   −amount  (consumed by a CreditApplication)
+///   reversal_added   −amount  (explicit correction of a credit_added row)
+///   reversal_applied +amount  (explicit correction of a credit_applied row)
+model CustomerCreditEntry {
+  id               Int      @id @default(autoincrement())
+  customerId       Int
+  sourceReturnId   Int?
+  reversesEntryId  Int?
+  entryType        String   @db.NVarChar(30)
+  amount           Decimal  @db.Decimal(18, 2)
+  reference        String?  @db.NVarChar(100)
+  reason           String?  @db.NVarChar(500)
+  createdBy        Int
+  createdAt        DateTime @default(now()) @db.DateTime2
+
+  customer     Customer              @relation(fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  sourceReturn InvoiceReturn?        @relation("CreditSourceReturn", fields: [sourceReturnId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  /// Invoice this entry was issued from / applied to / converted from a
+  /// return on. Required by the invoice-level credit figures (C and return
+  /// credit) and by the "invoice reference" column of the ledger (spec H).
+  sourceInvoiceId Int?
+  sourceInvoice   Invoice?            @relation("CreditSourceInvoice", fields: [sourceInvoiceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  /// Same replay-safe save key as Payment.idempotencyKey, used when a save
+  /// issues credit without recording cash.
+  idempotencyKey String?  @db.NVarChar(120)
+
+  reversesEntry CustomerCreditEntry? @relation("CreditReversal", fields: [reversesEntryId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  reversedBy   CustomerCreditEntry[] @relation("CreditReversal")
+  creator      User                  @relation("CreditEntryCreator", fields: [createdBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  applications CreditApplication[]
+
+  @@index([customerId, createdAt])
+  @@index([sourceReturnId])
+  @@map("CustomerCreditLedger")
+}
+
+/// Proves exactly which customer credit source paid for which invoice.
+/// One row per source entry consumed, so Σ amounts for one application always
+/// equals the ledger's credit_applied row created alongside it.
+model CreditApplication {
+  id                    Int      @id @default(autoincrement())
+  customerCreditEntryId Int
+  customerId            Int
+  invoiceId             Int
+  amount                Decimal  @db.Decimal(18, 2)
+  appliedBy             Int
+  appliedAt             DateTime @default(now()) @db.DateTime2
+  createdAt             DateTime @default(now()) @db.DateTime2
+
+  sourceEntry CustomerCreditEntry @relation(fields: [customerCreditEntryId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  customer    Customer            @relation(fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  invoice     Invoice             @relation(fields: [invoiceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  actor       User                @relation("CreditApplicationActor", fields: [appliedBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([invoiceId])
+  @@index([customerId])
+  @@map("CreditApplications")
+}
+
+/// Cross-document audit trail for every meaningful financial mutation.
+/// userSnapshot* keeps the display name/email even if the account changes.
+model AuditLog {
+  id               Int      @id @default(autoincrement())
+  userId           Int?
+  userSnapshotName String?  @db.NVarChar(200)
+  userSnapshotEmail String? @db.NVarChar(320)
+  action           String   @db.NVarChar(60)
+  documentType     String   @db.NVarChar(40)
+  documentId       Int?
+  invoiceReference String?  @db.NVarChar(40)
+  beforeJson       String?  @db.NVarChar(Max)
+  afterJson        String?  @db.NVarChar(Max)
+  /// Monetary amount *after* the change, when the action is financial.
+  amount           Decimal? @db.Decimal(18, 2)
+  reason           String?  @db.NVarChar(1000)
+  createdAt        DateTime @default(now()) @db.DateTime2
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  @@index([createdAt])
+  @@index([userId, createdAt])
+  @@index([documentType, documentId])
+  @@index([action])
+  @@map("AuditLogs")
+}
+
+/// Concurrency-safe allocator for human-facing document numbers that are not
+/// invoices (RET-0001, ...). Allocated with an atomic UPDATE inside
+/// the same transaction as the insert, so a rollback also rolls the number
+/// back. Invoice numbers keep using InvoiceCounters, which behaves the same way.
+model DocumentCounter {
+  key       String @id @db.NVarChar(40)
+  prefix    String @db.NVarChar(10)
+  nextValue Int
+
+  @@map("DocumentCounters")
 }
 
 model InvoiceCounter {
@@ -107,6 +438,10 @@ model Customer {
 
   user     User      @relation(fields: [userId], references: [id], onDelete: NoAction)
   invoices Invoice[]
+  returns  InvoiceReturn[]
+  returnCredits ReturnCredit[]
+  creditEntries CustomerCreditEntry[]
+  creditApplications CreditApplication[]
 
   @@index([userId, createdAt])
   @@index([userId, city])
@@ -116,9 +451,9 @@ model Customer {
 }
 
 model Product {
-  id            Int      @id @default(autoincrement())
+  id           Int      @id @default(autoincrement())
   userId        Int
-  name          String   @db.NVarChar(200)
+  name         String   @db.NVarChar(200)
 
   /// Normalised to trimmed upper-case, so "sku-1" and "SKU-1" are one code.
   /// Unique per owner; the database collation is case-insensitive as well.
@@ -140,6 +475,7 @@ model Product {
 
   user         User          @relation(fields: [userId], references: [id], onDelete: NoAction)
   invoiceItems InvoiceItem[]
+  stockMovements StockMovement[]
 
   @@unique([userId, code])
   @@index([userId, createdAt])
@@ -147,4 +483,40 @@ model Product {
   @@index([userId, unit])
   @@index([userId, name])
   @@map("Products")
+}
+
+/// Append-only stock ledger. Stock is never overwritten directly for a
+/// return: approving a physical return increments the product quantity and
+/// writes one row here referencing both the return and the original invoice,
+/// so every movement can be traced back to the document that caused it.
+model StockMovement {
+  id         Int      @id @default(autoincrement())
+  productId  Int
+
+  /// The document that caused the movement (return approval today).
+  returnId   Int?
+  invoiceId  Int?
+
+  /// One of: return_restock
+  movement   String   @db.NVarChar(30)
+
+  /// Signed quantity change (+7 restocked, -3 removed).
+  quantity   Int
+
+  /// Quantity after the movement, for audit readability (never used to
+  /// derive stock — Products.stockQuantity stays the live value).
+  stockAfter Int
+
+  reason     String?  @db.NVarChar(500)
+  createdBy  Int?
+  createdAt  DateTime @default(now()) @db.DateTime2
+
+  product Product        @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  invoice Invoice?       @relation(fields: [invoiceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  returned InvoiceReturn? @relation(fields: [returnId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([productId, createdAt])
+  @@index([returnId])
+  @@index([invoiceId])
+  @@map("StockMovements")
 }

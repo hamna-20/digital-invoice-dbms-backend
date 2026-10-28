@@ -12,6 +12,7 @@ const stamp = Date.now();
 const password = 'StrongPass!23';
 const ownerEmail = `test.product.${stamp}@example.test`;
 const otherEmail = `test.product.other.${stamp}@example.test`;
+const productCode = (offset) => String((stamp + offset) % 1_000_000).padStart(6, '0');
 const results = [];
 let ownerId;
 let otherId;
@@ -86,9 +87,9 @@ async function createTempReferenceTable(productId) {
 async function run() {
     let token;
     let otherToken;
-    const baseCode = `PRD-${stamp}`;
-    const fullCode = `SKU-${stamp}`;
-    const inactiveCode = `OLD-${stamp}`;
+    const baseCode = productCode(1);
+    const fullCode = productCode(2);
+    const inactiveCode = productCode(3);
 
     try {
         token = await createTestUser(ownerEmail, true);
@@ -99,24 +100,32 @@ async function run() {
         check('unauthenticated product request returns 401', noAuth.status === 401, `status=${noAuth.status}`);
 
         for (const [label, body] of [
-            ['name', { code: `MISS-${stamp}`, price: 10 }],
+            ['name', { code: productCode(4), price: 10 }],
             ['code', { name: 'Missing Code', price: 10 }],
-            ['price', { name: 'Missing Price', code: `MISS-${stamp}` }],
+            ['price', { name: 'Missing Price', code: productCode(5) }],
         ]) {
             const response = await request('POST', '/api/products', { token, body });
             check(`missing product ${label} returns 400`, response.status === 400, `status=${response.status}`);
         }
 
         for (const [label, body] of [
-            ['price', { name: 'Negative Price', code: `NEG-${stamp}-P`, price: -1 }],
-            ['tax rate', { name: 'Negative Tax', code: `NEG-${stamp}-T`, price: 1, taxRate: -1 }],
-            ['stock quantity', { name: 'Negative Stock', code: `NEG-${stamp}-S`, price: 1, stockQuantity: -1 }],
-            ['tax rate above 100', { name: 'High Tax', code: `NEG-${stamp}-H`, price: 1, taxRate: 101 }],
-            ['price with 3 decimals', { name: 'Odd Price', code: `NEG-${stamp}-D`, price: 10.999 }],
-            ['fractional stock', { name: 'Odd Stock', code: `NEG-${stamp}-F`, price: 1, stockQuantity: 1.5 }],
+            ['price', { name: 'Negative Price', code: productCode(10), price: -1 }],
+            ['tax rate', { name: 'Negative Tax', code: productCode(11), price: 1, taxRate: -1 }],
+            ['stock quantity', { name: 'Negative Stock', code: productCode(12), price: 1, stockQuantity: -1 }],
+            ['tax rate above 100', { name: 'High Tax', code: productCode(13), price: 1, taxRate: 101 }],
+            ['price with 3 decimals', { name: 'Odd Price', code: productCode(14), price: 10.999 }],
+            ['fractional stock', { name: 'Odd Stock', code: productCode(15), price: 1, stockQuantity: 1.5 }],
         ]) {
             const response = await request('POST', '/api/products', { token, body });
             check(`negative or invalid product ${label} returns 400`, response.status === 400, `status=${response.status}`);
+        }
+
+        for (const invalidCode of ['12345', '12345A', '1234567']) {
+            const invalid = await request('POST', '/api/products', {
+                token,
+                body: { name: 'Invalid Code Product', code: invalidCode, price: 10 },
+            });
+            check(`product code ${invalidCode} is rejected`, invalid.status === 400, `status=${invalid.status}`);
         }
 
         const minimal = await request('POST', '/api/products', {

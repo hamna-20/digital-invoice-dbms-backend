@@ -16,6 +16,7 @@ const ownerEmail = `test.dashboard.${stamp}@example.test`;
 const otherEmail = `test.dashboard.other.${stamp}@example.test`;
 const emptyEmail = `test.dashboard.empty.${stamp}@example.test`;
 const currentOnlyEmail = `test.dashboard.current.${stamp}@example.test`;
+const productCode = (offset) => String((stamp + offset) % 1_000_000).padStart(6, '0');
 const results = [];
 
 let ownerId;
@@ -145,14 +146,14 @@ async function run() {
         const customerTwo = await createCustomer(token, `Dashboard Customer Two ${stamp}`);
         const productOne = await createProduct(token, {
             name: `Dashboard Product One ${stamp}`,
-            code: `DP1-${stamp}`,
+            code: productCode(1),
             price: 100,
             taxRate: 10,
             stockQuantity: 1000,
         });
         const productTwo = await createProduct(token, {
             name: `Dashboard Product Two ${stamp}`,
-            code: `DP2-${stamp}`,
+            code: productCode(2),
             price: 50,
             taxRate: 5,
             stockQuantity: 1000,
@@ -214,7 +215,7 @@ async function run() {
         const otherCustomer = await createCustomer(otherToken, `Other Dashboard Customer ${stamp}`);
         const otherProduct = await createProduct(otherToken, {
             name: `Other Dashboard Product ${stamp}`,
-            code: `ODP-${stamp}`,
+            code: productCode(3),
             price: 100,
             taxRate: 10,
             stockQuantity: 100,
@@ -230,7 +231,7 @@ async function run() {
         const currentOnlyCustomer = await createCustomer(currentOnlyToken, `Current Only Customer ${stamp}`);
         const currentOnlyProduct = await createProduct(currentOnlyToken, {
             name: `Current Only Product ${stamp}`,
-            code: `COP-${stamp}`,
+            code: productCode(4),
             price: 100,
             taxRate: 10,
             stockQuantity: 100,
@@ -439,6 +440,10 @@ async function run() {
     } finally {
         for (const id of [ownerId, otherId, emptyId, currentOnlyId]) {
             if (!Number.isSafeInteger(id)) continue;
+            await prisma.creditNote.deleteMany({ where: { invoice: { userId: id } } }).catch(() => {});
+            await prisma.invoiceReturn.deleteMany({ where: { invoice: { userId: id } } }).catch(() => {});
+            await prisma.payment.deleteMany({ where: { invoice: { userId: id } } }).catch(() => {});
+            await prisma.invoiceActivity.deleteMany({ where: { invoice: { userId: id } } }).catch(() => {});
             await prisma.invoice.deleteMany({ where: { userId: id } }).catch(() => {});
             await prisma.product.deleteMany({ where: { userId: id } }).catch(() => {});
             await prisma.customer.deleteMany({ where: { userId: id } }).catch(() => {});

@@ -37,7 +37,7 @@ const config = {
 
     jwt: {
         secret: required('JWT_SECRET', process.env.JWT_SECRET),
-        expiresIn: process.env.JWT_EXPIRES_IN || '1h',
+        expiresIn: process.env.JWT_EXPIRES_IN || '1d',
         issuer: process.env.JWT_ISSUER || 'digital-invoice-api',
         audience: process.env.JWT_AUDIENCE || 'digital-invoice-web',
     },

@@ -5,12 +5,13 @@ import {
     COMPLETED_STATUSES,
     DECIMAL_ZERO,
     ISSUED_STATUS,
+    PARTIALLY_PAID_STATUS,
     PAID_STATUS,
     dashboardPeriods,
     effectiveStatus,
+    invoiceFinancialTotals,
     money,
     percentageChange,
-    startOfUtcDay,
     toDateOnly,
 } from '../utils/reporting.js';
 
@@ -54,9 +55,7 @@ function bucket(buckets, status) {
 
 export async function getSummary(userId, now = new Date()) {
     const periods = dashboardPeriods(now);
-    const today = startOfUtcDay(now);
-
-    const [monthGroups, previousAggregate, yearGroups, allTimeGroups, overdueAggregate, recent, topGroups] =
+    const [monthGroups, previousAggregate, yearGroups, allTimeGroups, recent, topGroups, financialInvoices] =
         await Promise.all([
             prisma.invoice.groupBy({
                 by: ['status'],
@@ -90,15 +89,6 @@ export async function getSummary(userId, now = new Date()) {
                 _sum: { taxTotal: true, grandTotal: true },
                 _count: { _all: true },
             }),
-            prisma.invoice.aggregate({
-                where: {
-                    userId,
-                    status: ISSUED_STATUS,
-                    dueDate: { not: null, lt: today },
-                },
-                _sum: { grandTotal: true },
-                _count: { _all: true },
-            }),
             prisma.invoice.findMany({
                 where: { userId },
                 select: {
@@ -129,6 +119,17 @@ export async function getSummary(userId, now = new Date()) {
                 orderBy: { _sum: { quantity: 'desc' } },
                 take: 5,
             }),
+            prisma.invoice.findMany({
+                where: { userId, status: { in: COMPLETED_STATUSES } },
+                select: {
+                    invoiceDate: true,
+                    dueDate: true,
+                    grandTotal: true,
+                    taxTotal: true,
+                    payments: { where: { status: 'completed' }, select: { amount: true, status: true } },
+                    creditNotes: { select: { appliedAmount: true, totalAmount: true, taxTotal: true } },
+                },
+            }),
         ]);
 
     const month = statusBuckets(monthGroups);
@@ -136,16 +137,27 @@ export async function getSummary(userId, now = new Date()) {
     const allTime = statusBuckets(allTimeGroups);
 
     const monthIssued = bucket(month, ISSUED_STATUS);
+    const monthPartial = bucket(month, PARTIALLY_PAID_STATUS);
     const monthPaid = bucket(month, PAID_STATUS);
     const yearIssued = bucket(year, ISSUED_STATUS);
+    const yearPartial = bucket(year, PARTIALLY_PAID_STATUS);
     const yearPaid = bucket(year, PAID_STATUS);
     const allTimeIssued = bucket(allTime, ISSUED_STATUS);
+    const allTimePartial = bucket(allTime, PARTIALLY_PAID_STATUS);
     const allTimePaid = bucket(allTime, PAID_STATUS);
 
-    const currentMonthSales = money(monthIssued.grandTotal.add(monthPaid.grandTotal));
+    const monthFinancials = invoiceFinancialTotals(financialInvoices.filter(
+        (invoice) => invoice.invoiceDate >= periods.currentMonthStart && invoice.invoiceDate < periods.nextMonthStart
+    ));
+    const yearFinancials = invoiceFinancialTotals(financialInvoices.filter(
+        (invoice) => invoice.invoiceDate >= periods.currentYearStart && invoice.invoiceDate < periods.nextYearStart
+    ));
+    const allTimeFinancials = invoiceFinancialTotals(financialInvoices);
+
+    const currentMonthSales = money(monthIssued.grandTotal.add(monthPartial.grandTotal).add(monthPaid.grandTotal));
     const previousMonthSales = money(previousAggregate._sum?.grandTotal ?? 0);
-    const currentYearSales = money(yearIssued.grandTotal.add(yearPaid.grandTotal));
-    const allTimeSales = money(allTimeIssued.grandTotal.add(allTimePaid.grandTotal));
+    const currentYearSales = money(yearIssued.grandTotal.add(yearPartial.grandTotal).add(yearPaid.grandTotal));
+    const allTimeSales = money(allTimeIssued.grandTotal.add(allTimePartial.grandTotal).add(allTimePaid.grandTotal));
 
     const topProductIds = topGroups.map((group) => group.productId);
     const topNameGroups =
@@ -210,31 +222,32 @@ export async function getSummary(userId, now = new Date()) {
                     ALL_STATUSES.map((status) => [status, bucket(month, status).count])
                 ),
                 paid: monthPaid.count,
-                outstanding: monthIssued.count,
+                partiallyPaid: monthPartial.count,
+                outstanding: monthIssued.count + monthPartial.count,
             },
         },
         tax: {
             recorded: {
-                currentMonth: money(monthIssued.taxTotal.add(monthPaid.taxTotal)),
-                currentYear: money(yearIssued.taxTotal.add(yearPaid.taxTotal)),
-                allTime: money(allTimeIssued.taxTotal.add(allTimePaid.taxTotal)),
+                currentMonth: money(monthIssued.taxTotal.add(monthPartial.taxTotal).add(monthPaid.taxTotal)),
+                currentYear: money(yearIssued.taxTotal.add(yearPartial.taxTotal).add(yearPaid.taxTotal)),
+                allTime: money(allTimeIssued.taxTotal.add(allTimePartial.taxTotal).add(allTimePaid.taxTotal)),
             },
             collected: {
-                currentMonth: money(monthPaid.taxTotal),
-                currentYear: money(yearPaid.taxTotal),
-                allTime: money(allTimePaid.taxTotal),
+                currentMonth: money(monthFinancials.taxCollected),
+                currentYear: money(yearFinancials.taxCollected),
+                allTime: money(allTimeFinancials.taxCollected),
             },
             outstanding: {
-                currentMonth: money(monthIssued.taxTotal),
-                currentYear: money(yearIssued.taxTotal),
-                allTime: money(allTimeIssued.taxTotal),
+                currentMonth: money(monthFinancials.taxOutstanding),
+                currentYear: money(yearFinancials.taxOutstanding),
+                allTime: money(allTimeFinancials.taxOutstanding),
             },
         },
         outstanding: {
-            amount: money(allTimeIssued.grandTotal),
-            invoiceCount: allTimeIssued.count,
-            overdueAmount: money(overdueAggregate._sum?.grandTotal ?? 0),
-            overdueInvoiceCount: overdueAggregate._count?._all ?? 0,
+            amount: money(allTimeFinancials.outstandingAmount),
+            invoiceCount: allTimeFinancials.outstandingInvoiceCount,
+            overdueAmount: money(allTimeFinancials.overdueAmount),
+            overdueInvoiceCount: allTimeFinancials.overdueInvoiceCount,
         },
         recentInvoices: recent.map((invoice) => ({
             id: invoice.id,
