@@ -21,10 +21,12 @@ const productSelect = {
  */
 function serializeProduct(product) {
     const toNumber = (value) => (value && typeof value.toNumber === 'function' ? value.toNumber() : Number(value));
+    const p = product;
     return {
-        ...product,
-        price: toNumber(product.price),
-        taxRate: toNumber(product.taxRate),
+        ...p,
+        price: toNumber(p.price),
+        taxRate: toNumber(p.taxRate),
+        stockStatus: !p.isActive ? 'inactive' : p.stockQuantity > 0 ? 'available' : 'out_of_stock',
     };
 }
 

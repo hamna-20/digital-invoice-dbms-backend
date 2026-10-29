@@ -401,16 +401,14 @@ export function validateInvoicePayment(body) {
     const value = {};
     const allowed = new Set([
         'amount',
-        'paidAmount',
+        'paymentKind',
+        'creditDueDate',
         'paymentDate',
+        'expectedVersion',
+        'idempotencyKey',
         'method',
         'reference',
         'notes',
-        'creditAmount',
-        'creditReason',
-        'reason',
-        'idempotencyKey',
-        'expectedVersion',
     ]);
 
     if (!isObject(body)) {
@@ -420,44 +418,45 @@ export function validateInvoicePayment(body) {
         if (!allowed.has(field)) errors.push({ field, message: 'Field is not supported' });
     }
 
-    /** Non-negative money with at most two decimals, returned as a fixed string. */
-    const parseMoney = (field, input, label) => {
-        if (input === undefined || input === null || input === '') return null;
-        const num = typeof input === 'string' ? (input.trim() === '' ? NaN : Number(input)) : input;
-        if (typeof num !== 'number' || !Number.isFinite(num) || num < 0) {
-            errors.push({ field, message: `${label} must be a non-negative number` });
-            return null;
-        }
-        if (!/^\d{1,16}(?:\.\d{1,2})?$/.test(String(num))) {
-            errors.push({ field, message: `${label} must have no more than two decimal places` });
-            return null;
-        }
-        return num.toFixed(2);
-    };
+    const paymentKind = body.paymentKind === undefined ? 'payment' : body.paymentKind;
+    if (paymentKind !== 'payment' && paymentKind !== 'credit_return') {
+        errors.push({ field: 'paymentKind', message: 'Payment kind must be payment or credit_return' });
+    } else {
+        value.paymentKind = paymentKind;
+    }
 
-    const amount = parseMoney('amount', body.amount !== undefined ? body.amount : body.paidAmount, 'Amount');
-    const creditAmount = parseMoney('creditAmount', body.creditAmount, 'Credit amount');
-    value.amount = amount ?? '0.00';
-    if (creditAmount !== null) value.creditAmount = creditAmount;
-
-    const reasonInput = body.creditReason !== undefined ? body.creditReason : body.reason;
-    let creditReason = null;
-    if (reasonInput !== undefined && reasonInput !== null && reasonInput !== '') {
-        if (typeof reasonInput !== 'string') {
-            errors.push({ field: 'creditReason', message: 'Credit reason must be a string' });
-        } else if (reasonInput.trim().length > 500) {
-            errors.push({ field: 'creditReason', message: 'Credit reason must be at most 500 characters' });
+    if (body.amount === undefined || body.amount === null || body.amount === '') {
+        errors.push({ field: 'amount', message: 'Amount is required' });
+    } else {
+        const input = body.amount;
+        const text = typeof input === 'string' ? input.trim() : String(input);
+        const amount = Number(text);
+        if (!text || !Number.isFinite(amount) || amount < 0) {
+            errors.push({ field: 'amount', message: 'Amount must be a non-negative number' });
+        } else if (!/^\d{1,16}(?:\.\d{1,2})?$/.test(text)) {
+            errors.push({ field: 'amount', message: 'Amount must have no more than two decimal places' });
+        } else if (amount === 0 && paymentKind !== 'payment') {
+            errors.push({ field: 'amount', message: 'Amount must be greater than zero' });
         } else {
-            creditReason = reasonInput.trim() || null;
+            value.amount = amount.toFixed(2);
         }
     }
-    if (creditReason) value.creditReason = creditReason;
 
-    if (Number(creditAmount ?? 0) > 0 && !creditReason) {
-        errors.push({ field: 'creditReason', message: 'Reason is required when a credit amount is entered' });
+    if (body.creditDueDate !== undefined && body.creditDueDate !== null && body.creditDueDate !== '') {
+        const creditDueDate = validDate(body.creditDueDate);
+        if (!creditDueDate) {
+            errors.push({ field: 'creditDueDate', message: 'Credit due date must be a valid YYYY-MM-DD date' });
+        } else {
+            value.creditDueDate = creditDueDate;
+        }
     }
-    if (Number(value.amount) <= 0 && Number(creditAmount ?? 0) <= 0) {
-        errors.push({ field: 'amount', message: 'Enter a paid amount or a credit amount greater than zero' });
+
+    if (body.paymentDate !== undefined && body.paymentDate !== null && body.paymentDate !== '') {
+        const date = validDate(body.paymentDate);
+        if (!date) errors.push({ field: 'paymentDate', message: 'Payment date must be a valid YYYY-MM-DD date' });
+        else value.paymentDate = date;
+    } else {
+        value.paymentDate = new Date();
     }
 
     if (body.idempotencyKey !== undefined && body.idempotencyKey !== null && body.idempotencyKey !== '') {
@@ -477,14 +476,6 @@ export function validateInvoicePayment(body) {
         } else {
             value.expectedVersion = version;
         }
-    }
-
-    if (body.paymentDate === undefined || body.paymentDate === null || body.paymentDate === '') {
-        value.paymentDate = new Date();
-    } else {
-        const date = validDate(body.paymentDate);
-        if (!date) errors.push({ field: 'paymentDate', message: 'Payment date must be a valid YYYY-MM-DD date' });
-        else value.paymentDate = date;
     }
 
     const methods = new Set(['cash', 'bank_transfer', 'cheque', 'other']);

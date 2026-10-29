@@ -20,6 +20,7 @@ const TERMINAL_STATUS = new Set(['draft', 'void', 'cancelled']);
 
 export function deriveStatus(storedStatus, settlement) {
     if (TERMINAL_STATUS.has(storedStatus)) return storedStatus;
+    if (settlement.originalTotalPaisa > 0 && settlement.effectiveTotalPaisa === 0) return 'returned';
     if (settlement.unpaidPaisa <= 0) return 'paid';
     return settlement.settledPaisa > 0 ? 'partially_paid' : 'issued';
 }
@@ -86,6 +87,7 @@ export function settlementFromRows(invoice) {
         creditsAppliedPaisa: customerCreditPaisa + otherCreditPaisa,
         creditGivenPaisa,
         creditIssuedPaisa: creditGivenPaisa,
+        creditOutstandingPaisa: Math.min(creditGivenPaisa, unpaidPaisa),
         returnCreditPaisa,
         invoiceReturnCreditPaisa: returnCreditPaisa,
         settledPaisa: money.settledPaisa,
@@ -143,7 +145,7 @@ export function settlementSelect() {
                 items: { select: { quantity: true } },
             },
         },
-        creditEntries: { select: { entryType: true, amount: true } },
+        creditEntries: { select: { entryType: true, amount: true, creditDueDate: true } },
     };
 }
 
@@ -187,6 +189,7 @@ export function serializeSettlement(settlement) {
         amountPaid: toAmount(settlement.paidPaisa),
         creditGiven: toAmount(settlement.creditGivenPaisa),
         creditIssued: toAmount(settlement.creditGivenPaisa),
+        creditOutstanding: toAmount(settlement.creditOutstandingPaisa),
         customerCreditApplied: toAmount(settlement.customerCreditPaisa),
         returnCredit: toAmount(settlement.returnCreditPaisa),
         invoiceReturnCredit: toAmount(settlement.returnCreditPaisa),
@@ -202,6 +205,7 @@ export function serializeSettlement(settlement) {
         amountPaidPaisa: settlement.paidPaisa,
         creditGivenPaisa: settlement.creditGivenPaisa,
         creditIssuedPaisa: settlement.creditGivenPaisa,
+        creditOutstandingPaisa: settlement.creditOutstandingPaisa,
         customerCreditAppliedPaisa: settlement.customerCreditPaisa,
         returnCreditPaisa: settlement.returnCreditPaisa,
         otherCreditAppliedPaisa: settlement.otherCreditPaisa,

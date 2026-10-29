@@ -102,7 +102,9 @@ export function planReturnSettlement({
     const before = clamp(Math.trunc(unpaidBeforePaisa));
     const after = clamp(Math.trunc(unpaidAfterPaisa));
 
-    const unpaidReductionPaisa = Math.min(value, Math.max(0, before - after));
+    const    // unpaidAfterPaisa reflects the unpaid amount after the return, so
+    // unpaidReductionPaisa = returnValue when returnValue <= unpaidBefore.
+    unpaidReductionPaisa = Math.min(value, Math.max(0, before - after));
     const customerCreditPaisa = value - unpaidReductionPaisa;
 
     return { unpaidReductionPaisa, customerCreditPaisa };
@@ -151,6 +153,16 @@ export function deriveBadges({
     if (storedStatus === 'draft') return ['draft'];
     if (storedStatus === 'cancelled') return ['cancelled'];
     if (storedStatus === 'void') return ['void'];
+
+    if (money.originalTotalPaisa > 0 && money.effectiveTotalPaisa === 0) {
+        return hasReturn ? ['return'] : [];
+    }
+
+    // A fully-returned invoice (original > 0, effective == 0) carries only the return badge —
+    // never paid, even when unpaid == 0 and amount paid == 0.
+    if (money.originalTotalPaisa > 0 && money.effectiveTotalPaisa === 0) {
+        return hasReturn ? ['return'] : [];
+    }
 
     const badges = [];
     const { effectiveTotalPaisa, settledPaisa, unpaidPaisa } = money;

@@ -80,7 +80,7 @@ const invoiceSelect = {
     createdAt: true,
     updatedAt: true,
     version: true,
-    creditEntries: { select: { entryType: true, amount: true } },
+    creditEntries: { select: { entryType: true, amount: true, creditDueDate: true } },
     user: { select: { fullName: true, email: true } },
     issuer: { select: { fullName: true, email: true } },
     voider: { select: { fullName: true, email: true } },
@@ -202,7 +202,7 @@ function statusTags(invoice) {
  * for ever. `allowedActions` spells out the transitions available right now.
  */
 function invoiceActions(invoice, status) {
-    const editable = status !== 'paid' && status !== 'void' && status !== 'cancelled';
+    const editable = !['paid', 'returned', 'void', 'cancelled'].includes(status);
     const stored = invoice.status;
     const settlement = settlementFromRows(invoice);
 
@@ -242,6 +242,13 @@ function serializeInvoice(invoice, { returnCreditTransfers = new Map(), creditBa
     const settlement = settlementFromRows(invoice);
     const status = effectiveStatus(invoice);
     const actions = invoiceActions(invoice, status);
+
+    const dueDates = settlement.creditOutstandingPaisa > 0
+        ? (invoice.creditEntries || [])
+            .filter((entry) => entry.entryType === 'issued' && entry.creditDueDate && toPaisa(entry.amount) > 0)
+            .map((entry) => new Date(entry.creditDueDate).getTime())
+        : [];
+    const creditDueDate = dueDates.length ? toDateOnly(new Date(Math.min(...dueDates))) : null;
 
     // Per-line return state from ONE calculation (settlement.policy.js,
     // CONFIRM 5): `returnedQuantity` counts approved returns only,
@@ -312,6 +319,7 @@ function serializeInvoice(invoice, { returnCreditTransfers = new Map(), creditBa
             // that is still going to come back to this invoice.
             returnCreditPending: toAmount(returnCreditPendingPaisa),
             returnCreditPendingPaisa,
+            creditDueDate,
         },
         /// Account summary of the invoice detail modal (spec F). Exactly these
         /// five lines — the old "Credit notes applied" line is gone.
@@ -330,16 +338,7 @@ function serializeInvoice(invoice, { returnCreditTransfers = new Map(), creditBa
         /// Customer credit section (spec F): the customer's ledger balance and
         /// only what was applied to THIS invoice (issued credit shows up in
         /// the balance and in accountSummary.creditIssued, never here).
-        customerCredit: (() => {
-            if (!creditBalances) return null;
-            const balance = creditBalances.get(invoice.customerId) ?? 0;
-            return {
-                availableBalance: toAmount(balance),
-                availableBalancePaisa: balance,
-                creditAppliedToInvoice: toAmount(settlement.appliedPaisa),
-                creditAppliedToInvoicePaisa: settlement.appliedPaisa,
-            };
-        })(),
+        customerCredit: null,
         returnWorkflow: {
             awaitingApproval: awaitingApproval.length,
             awaitingApprovalValue: toAmount(
@@ -812,7 +811,7 @@ export async function updateInvoice(actor, id, input) {
     // or void invoice is terminal. The money state, not the stored column,
     // decides "fully paid" so a freshly settled invoice locks immediately.
     const before = settlementFromRows(existing);
-    if (['paid', 'void', 'cancelled'].includes(before.status)) {
+    if (['paid', 'returned', 'void', 'cancelled'].includes(before.status)) {
         throw statusConflict('edit', before.status);
     }
 
@@ -952,12 +951,7 @@ export async function updateInvoice(actor, id, input) {
     return getInvoice(actor, id);
 }
 
-/**
- * Records cash received (paid) and/or credit given on credit (udhaar).
- *
- *   paid   <= unpaid before this save + credit given in this save
- *   credit has no excess-cash rule; it is added to the invoice's unpaid amount.
- */
+/** Records cash now and issues the unpaid remainder as invoice credit. */
 export async function recordPayment(actor, id, input) {
     if (!can(actor.role, 'payment.create')) {
         throw ApiError.forbidden(
@@ -965,46 +959,31 @@ export async function recordPayment(actor, id, input) {
         );
     }
 
-    const paidInput = input.amount ?? input.paidAmount;
-    const paidPaisa =
-        paidInput === undefined || paidInput === null || paidInput === '' ? ZERO_PAISA : toPaisa(paidInput);
-    const creditPaisa =
-        input.creditAmount === undefined || input.creditAmount === null || input.creditAmount === ''
-            ? ZERO_PAISA
-            : toPaisa(input.creditAmount);
-
-    if (!Number.isSafeInteger(paidPaisa) || !Number.isSafeInteger(creditPaisa) || paidPaisa < 0 || creditPaisa < 0) {
-        throw ApiError.badRequest('Amount must be a non-negative value with at most two decimals.');
-    }
-    if (paidPaisa === ZERO_PAISA && creditPaisa === ZERO_PAISA) {
-        throw ApiError.badRequest('Enter a paid amount or a credit amount greater than zero.', [
-            { field: 'amount', message: 'Enter a paid amount or credit amount greater than zero' },
-        ]);
-    }
-    if (creditPaisa > ZERO_PAISA && !String(input.creditReason ?? '').trim()) {
-        throw ApiError.badRequest('Validation failed', [
-            { field: 'creditReason', message: 'Reason is required when a credit amount is entered' },
+    const paymentKind = input.paymentKind ?? 'payment';
+    const paidPaisa = toPaisa(input.amount);
+    if (!Number.isSafeInteger(paidPaisa) || paidPaisa < 0) {
+        throw ApiError.badRequest('Amount must be a non-negative value with at most two decimals.', [
+            { field: 'amount', message: 'Amount must be a non-negative value with at most two decimals' },
         ]);
     }
 
     const idempotencyKey = input.idempotencyKey ? `${id}:${input.idempotencyKey}` : null;
-/** True when a save with this idempotency key has already committed. */
-   async function isReplayedSave(db, invoiceId, idempotencyKey) {
-       if (!idempotencyKey) return false;
-       const payment = await db.payment.findFirst({
-           where: { invoiceId, idempotencyKey },
-           select: { id: true },
-       });
-       if (payment) return true;
-       const entry = await db.customerCreditEntry.findFirst({
-           where: { sourceInvoiceId: invoiceId, idempotencyKey },
-           select: { id: true },
-       });
-       return Boolean(entry);
-   }
+    /** True when a save with this idempotency key has already committed. */
+    async function isReplayedSave(db, invoiceId, key) {
+        if (!key) return false;
+        const payment = await db.payment.findFirst({
+            where: { invoiceId, idempotencyKey: key },
+            select: { id: true },
+        });
+        if (payment) return true;
+        const entry = await db.customerCreditEntry.findFirst({
+            where: { sourceInvoiceId: invoiceId, idempotencyKey: key },
+            select: { id: true },
+        });
+        return Boolean(entry);
+    }
 
     const hasExpectedVersion = input.expectedVersion !== undefined && input.expectedVersion !== null;
-
     if (await isReplayedSave(prisma, id, idempotencyKey)) {
         return { invoice: await getInvoice(actor, id), replayed: true };
     }
@@ -1039,12 +1018,35 @@ export async function recordPayment(actor, id, input) {
             where: { id },
             select: { id: true, invoiceNumber: true, customerId: true },
         });
-
         const settlement = await loadSettlement(tx, id);
-        if (paidPaisa + creditPaisa > settlement.unpaidPaisa) {
-            throw ApiError.conflict(
-                `Cash plus credit cannot be more than the unpaid amount of ${toAmount(settlement.unpaidPaisa).toFixed(2)}.`
-            );
+        const unpaidPaisa = settlement.unpaidPaisa;
+        const creditOutstandingPaisa = Math.min(settlement.creditIssuedPaisa, unpaidPaisa);
+        let remainderPaisa = ZERO_PAISA;
+
+        if (paymentKind === 'payment') {
+            if (creditOutstandingPaisa > ZERO_PAISA) {
+                throw ApiError.conflict('Credit is still outstanding. Collect it with Credit return.');
+            }
+            if (paidPaisa > unpaidPaisa) {
+                throw ApiError.conflict(
+                    `Paid amount cannot be more than the unpaid amount of ${toAmount(unpaidPaisa).toFixed(2)}.`
+                );
+            }
+            remainderPaisa = unpaidPaisa - paidPaisa;
+            if (remainderPaisa > ZERO_PAISA && !input.creditDueDate) {
+                throw ApiError.badRequest('Validation failed', [
+                    { field: 'creditDueDate', message: 'Credit due date is required when part of the amount is left on credit.' },
+                ]);
+            }
+        } else if (paymentKind === 'credit_return') {
+            if (creditOutstandingPaisa === ZERO_PAISA) {
+                throw ApiError.conflict('No credit is outstanding on this invoice.');
+            }
+            if (paidPaisa <= ZERO_PAISA || paidPaisa > creditOutstandingPaisa) {
+                throw ApiError.conflict(
+                    `Credit return cannot be more than ${toAmount(creditOutstandingPaisa).toFixed(2)}.`
+                );
+            }
         }
 
         let paymentId = null;
@@ -1065,15 +1067,16 @@ export async function recordPayment(actor, id, input) {
             paymentId = payment.id;
         }
 
-        if (creditPaisa > ZERO_PAISA) {
+        if (paymentKind === 'payment' && remainderPaisa > ZERO_PAISA) {
             await tx.customerCreditEntry.create({
                 data: {
                     customerId: invoice.customerId,
                     sourceInvoiceId: id,
                     entryType: 'issued',
-                    amount: toDecimal(creditPaisa),
+                    amount: toDecimal(remainderPaisa),
                     reference: invoice.invoiceNumber,
-                    reason: input.creditReason.trim(),
+                    reason: 'Balance on credit',
+                    creditDueDate: input.creditDueDate,
                     idempotencyKey,
                     createdBy: actor.id,
                 },
@@ -1081,7 +1084,6 @@ export async function recordPayment(actor, id, input) {
         }
 
         const refreshed = await refreshStatus(tx, id);
-
         await writeAudit(tx, {
             actor,
             action: 'payment.recorded',
@@ -1089,25 +1091,26 @@ export async function recordPayment(actor, id, input) {
             documentId: paymentId,
             invoiceReference: invoice.invoiceNumber,
             after: {
+                paymentKind,
                 paymentAmount: toAmount(paidPaisa),
-                creditGiven: toAmount(creditPaisa),
+                creditGiven: paymentKind === 'payment' ? toAmount(remainderPaisa) : ZERO_PAISA,
                 outstanding: toAmount(refreshed.unpaidPaisa),
                 status: refreshed.status,
             },
             amountPaisa: paidPaisa,
-            reason: input.notes ?? null,
+            reason: paymentKind === 'credit_return' ? 'Credit return' : input.notes ?? null,
         });
 
-        if (creditPaisa > ZERO_PAISA) {
+        if (paymentKind === 'payment' && remainderPaisa > ZERO_PAISA) {
             await writeAudit(tx, {
                 actor,
                 action: 'credit.given',
                 documentType: 'customer_credit',
                 documentId: invoice.customerId,
                 invoiceReference: invoice.invoiceNumber,
-                after: { creditGiven: toAmount(creditPaisa), outstanding: toAmount(refreshed.unpaidPaisa) },
-                amountPaisa: creditPaisa,
-                reason: input.creditReason.trim(),
+                after: { creditGiven: toAmount(remainderPaisa), outstanding: toAmount(refreshed.unpaidPaisa) },
+                amountPaisa: remainderPaisa,
+                reason: 'Balance on credit',
             });
         }
 

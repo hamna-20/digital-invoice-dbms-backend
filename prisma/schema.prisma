@@ -325,6 +325,7 @@ model CustomerCreditEntry {
   amount           Decimal  @db.Decimal(18, 2)
   reference        String?  @db.NVarChar(100)
   reason           String?  @db.NVarChar(500)
+  creditDueDate    DateTime? @db.Date
   createdBy        Int
   createdAt        DateTime @default(now()) @db.DateTime2
 

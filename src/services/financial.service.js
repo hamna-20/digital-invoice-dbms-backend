@@ -185,6 +185,9 @@ export async function createReturn(actor, invoiceId, input) {
         const lines = await buildReturnLines(tx, invoiceId, input.items);
         const subtotal = lines.reduce((sum, line) => sum.add(line.subtotal), new Decimal(0));
         const taxTotal = lines.reduce((sum, line) => sum.add(line.taxAmount), new Decimal(0));
+
+        const settlement = await loadSettlement(tx, invoiceId);
+
         const returnNumber = await allocateDocumentNumber(tx, 'return');
 
         const record = await tx.invoiceReturn.create({
@@ -215,7 +218,13 @@ export async function createReturn(actor, invoiceId, input) {
             reason: input.reason,
         });
 
-        return { ...serializeReturn(record, invoice.invoiceNumber), credit: null };
+        const totals = subtotal.add(taxTotal);
+        let response = { ...serializeReturn(record, invoice.invoiceNumber), credit: null };
+        if (toPaisa(totals) > settlement.unpaidPaisa) {
+            response.outstandingWarning = true;
+            response.outstandingAmount = toAmount(settlement.unpaidPaisa);
+        }
+        return response;
     });
 }
 
@@ -261,6 +270,7 @@ export async function updateReturn(actor, invoiceId, returnId, input) {
                 taxTotal: taxTotal.toDecimalPlaces(2, Decimal.ROUND_HALF_UP),
                 totalAmount: subtotal.add(taxTotal).toDecimalPlaces(2, Decimal.ROUND_HALF_UP),
                 items: { deleteMany: {}, create: lines },
+                totalAmount: subtotal.add(taxTotal).toDecimalPlaces(2, Decimal.ROUND_HALF_UP),
             },
             include: { items: true },
         });
@@ -313,8 +323,7 @@ async function revalidateReturnItems(tx, record, excludeReturnId = null) {
  * Approves a pending return exactly once. In one transaction it:
  *   1. marks the return approved;
  *   2. restocks saleable lines (stock incremented, one StockMovement per product);
- *   3. settles the return value: credit clawback, then unpaid reduction,
- *      then leftover to customer credit ('return_credit');
+ *   3. reduces the unpaid amount by the return value; paid amounts are never refunded;
  *   4. refreshes the derived invoice status and bumps the version.
  */
 export async function approveReturn(actor, returnId) {
@@ -342,6 +351,12 @@ export async function approveReturn(actor, returnId) {
         const before = await loadSettlement(tx, record.invoiceId);
         const returnValuePaisa = toPaisa(record.totalAmount);
 
+        if (returnValuePaisa > before.unpaidPaisa) {
+            throw ApiError.conflict(
+                `Return value ${toAmount(returnValuePaisa).toFixed(2)} is more than the outstanding amount ${toAmount(before.unpaidPaisa).toFixed(2)}. Stock can only be returned against unpaid or credit balance. Refunds of paid amounts are not supported yet.`
+            );
+        }
+
         // Money state after this return. Udhaar (creditGiven) stays in the amount due.
         const after = computeMoneyState({
             totalPaisa: before.originalTotalPaisa,
@@ -357,6 +372,9 @@ export async function approveReturn(actor, returnId) {
             unpaidBeforePaisa: before.unpaidPaisa,
             unpaidAfterPaisa: after.unpaidPaisa,
         });
+        if (plan.customerCreditPaisa > 0) {
+            // Should be unreachable after the outstanding check.
+        }
 
         const claim = await tx.invoiceReturn.updateMany({
             where: { id: returnId, status: { in: ['pending', 'draft'] } },
@@ -416,22 +434,6 @@ export async function approveReturn(actor, returnId) {
             });
         }
 
-        // Leftover becomes customer return credit (advance balance).
-        if (plan.customerCreditPaisa > 0) {
-            await tx.customerCreditEntry.create({
-                data: {
-                    customerId: record.customerId,
-                    sourceInvoiceId: record.invoiceId,
-                    sourceReturnId: returnId,
-                    entryType: 'return_credit',
-                    amount: toDecimal(plan.customerCreditPaisa),
-                    reference: record.returnNumber,
-                    reason: `Return credit from ${record.returnNumber}`,
-                    createdBy: actor.id,
-                },
-            });
-        }
-
         await tx.invoice.updateMany({
             where: { id: record.invoiceId },
             data: { version: { increment: 1 }, updatedAt: new Date() },
@@ -449,9 +451,9 @@ export async function approveReturn(actor, returnId) {
                 status: 'approved',
                 invoiceStatus: refreshed ? refreshed.status : before.storedStatus,
                 returnValue: toAmount(returnValuePaisa),
-                unpaidReduction: toAmount(plan.unpaidReductionPaisa),
-                returnCredit: toAmount(plan.customerCreditPaisa),
+                unpaidReduction: toAmount(returnValuePaisa),
                 outstanding: toAmount(after.unpaidPaisa),
+                returnCredit: 0,
             },
             amountPaisa: returnValuePaisa,
             reason: record.reason,
