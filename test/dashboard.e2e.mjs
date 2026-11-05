@@ -8,6 +8,7 @@
  * period is the current UTC month/year, so dates are computed at runtime.
  */
 import prisma from '../src/db/prisma.js';
+import { customerFixture, ensureSellerProfile, productFixture } from './fbr-fixtures.mjs';
 
 const BASE = process.env.API_BASE_URL || 'http://localhost:5000';
 const stamp = Date.now();
@@ -96,15 +97,18 @@ async function createTestUser(address, isOwner) {
         body: { email: address, password },
     });
     check(`signin dashboard user (${isOwner})`, signin.status === 200, `status=${signin.status}`);
-    return signin.json?.data?.token;
+    const token = signin.json?.data?.token;
+    const seller = await ensureSellerProfile(request, token);
+    check(`seller profile ready (${isOwner})`, seller.status === 200, `status=${seller.status}`);
+    return token;
 }
 
 async function createCustomer(token, name) {
-    return (await request('POST', '/api/customers', { token, body: { name } })).json?.data?.customer;
+    return (await request('POST', '/api/customers', { token, body: customerFixture({ name }) })).json?.data?.customer;
 }
 
 async function createProduct(token, body) {
-    return (await request('POST', '/api/products', { token, body })).json?.data?.product;
+    return (await request('POST', '/api/products', { token, body: productFixture(body) })).json?.data?.product;
 }
 
 async function createInvoice(token, { customerId, invoiceDate, dueDate, items }) {
@@ -447,6 +451,7 @@ async function run() {
             await prisma.invoice.deleteMany({ where: { userId: id } }).catch(() => {});
             await prisma.product.deleteMany({ where: { userId: id } }).catch(() => {});
             await prisma.customer.deleteMany({ where: { userId: id } }).catch(() => {});
+            await prisma.businessProfile.deleteMany({ where: { userId: id } }).catch(() => {});
             await prisma.user.deleteMany({ where: { id } }).catch(() => {});
         }
         await prisma.$disconnect();

@@ -9,24 +9,31 @@ BEGIN TRY
 
 BEGIN TRAN;
 
-CREATE NONCLUSTERED INDEX [ReturnCredits_customerId_idx] ON [dbo].[ReturnCredits]([customerId]);
-CREATE NONCLUSTERED INDEX [ReturnCredits_invoiceId_idx] ON [dbo].[ReturnCredits]([invoiceId]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ReturnCredits_customerId_idx' AND object_id = OBJECT_ID('[dbo].[ReturnCredits]'))
+    CREATE NONCLUSTERED INDEX [ReturnCredits_customerId_idx] ON [dbo].[ReturnCredits]([customerId]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ReturnCredits_invoiceId_idx' AND object_id = OBJECT_ID('[dbo].[ReturnCredits]'))
+    CREATE NONCLUSTERED INDEX [ReturnCredits_invoiceId_idx] ON [dbo].[ReturnCredits]([invoiceId]);
 
-CREATE NONCLUSTERED INDEX [Refunds_returnId_status_idx] ON [dbo].[Refunds]([returnId], [status]);
-CREATE NONCLUSTERED INDEX [Refunds_status_refundDate_idx] ON [dbo].[Refunds]([status], [refundDate]);
-
-CREATE NONCLUSTERED INDEX [CustomerCreditLedger_customerId_createdAt_idx]
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'CustomerCreditLedger_customerId_createdAt_idx' AND object_id = OBJECT_ID('[dbo].[CustomerCreditLedger]'))
+    CREATE NONCLUSTERED INDEX [CustomerCreditLedger_customerId_createdAt_idx]
     ON [dbo].[CustomerCreditLedger]([customerId], [createdAt]);
-CREATE NONCLUSTERED INDEX [CustomerCreditLedger_sourceReturnId_idx]
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'CustomerCreditLedger_sourceReturnId_idx' AND object_id = OBJECT_ID('[dbo].[CustomerCreditLedger]'))
+    CREATE NONCLUSTERED INDEX [CustomerCreditLedger_sourceReturnId_idx]
     ON [dbo].[CustomerCreditLedger]([sourceReturnId]);
 
-CREATE NONCLUSTERED INDEX [CreditApplications_invoiceId_idx] ON [dbo].[CreditApplications]([invoiceId]);
-CREATE NONCLUSTERED INDEX [CreditApplications_customerId_idx] ON [dbo].[CreditApplications]([customerId]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'CreditApplications_invoiceId_idx' AND object_id = OBJECT_ID('[dbo].[CreditApplications]'))
+    CREATE NONCLUSTERED INDEX [CreditApplications_invoiceId_idx] ON [dbo].[CreditApplications]([invoiceId]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'CreditApplications_customerId_idx' AND object_id = OBJECT_ID('[dbo].[CreditApplications]'))
+    CREATE NONCLUSTERED INDEX [CreditApplications_customerId_idx] ON [dbo].[CreditApplications]([customerId]);
 
-CREATE NONCLUSTERED INDEX [AuditLogs_createdAt_idx] ON [dbo].[AuditLogs]([createdAt]);
-CREATE NONCLUSTERED INDEX [AuditLogs_userId_createdAt_idx] ON [dbo].[AuditLogs]([userId], [createdAt]);
-CREATE NONCLUSTERED INDEX [AuditLogs_documentType_documentId_idx] ON [dbo].[AuditLogs]([documentType], [documentId]);
-CREATE NONCLUSTERED INDEX [AuditLogs_action_idx] ON [dbo].[AuditLogs]([action]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'AuditLogs_createdAt_idx' AND object_id = OBJECT_ID('[dbo].[AuditLogs]'))
+    CREATE NONCLUSTERED INDEX [AuditLogs_createdAt_idx] ON [dbo].[AuditLogs]([createdAt]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'AuditLogs_userId_createdAt_idx' AND object_id = OBJECT_ID('[dbo].[AuditLogs]'))
+    CREATE NONCLUSTERED INDEX [AuditLogs_userId_createdAt_idx] ON [dbo].[AuditLogs]([userId], [createdAt]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'AuditLogs_documentType_documentId_idx' AND object_id = OBJECT_ID('[dbo].[AuditLogs]'))
+    CREATE NONCLUSTERED INDEX [AuditLogs_documentType_documentId_idx] ON [dbo].[AuditLogs]([documentType], [documentId]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'AuditLogs_action_idx' AND object_id = OBJECT_ID('[dbo].[AuditLogs]'))
+    CREATE NONCLUSTERED INDEX [AuditLogs_action_idx] ON [dbo].[AuditLogs]([action]);
 
 COMMIT TRAN;
 

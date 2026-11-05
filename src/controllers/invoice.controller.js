@@ -124,3 +124,11 @@ export async function remove(req, res) {
     await invoiceService.deleteInvoice(actor(req), req.validatedId);
     return res.status(204).end();
 }
+
+export async function fbrPreview(req, res) {
+    const preview = await invoiceService.fbrPreview(actor(req), req.validatedId);
+    return res.status(200).json({
+        success: true,
+        data: preview,
+    });
+}

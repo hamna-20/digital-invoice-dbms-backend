@@ -17,6 +17,7 @@
  *   6. Rejecting without a reason returns 400.
  */
 import prisma from '../src/db/prisma.js';
+import { customerFixture, ensureSellerProfile, productFixture } from './fbr-fixtures.mjs';
 
 const BASE = process.env.API_BASE_URL || 'http://localhost:5000';
 const stamp = Date.now();
@@ -85,17 +86,20 @@ async function run() {
         check('test user signed in', signin.status === 200 && Boolean(token));
         if (!token) throw new Error('No access token; cannot continue');
 
+        const seller = await ensureSellerProfile(request, token);
+        check('seller profile ready', seller.status === 200, `status=${seller.status}`);
+
         // 1. Customer, product with stock 10, invoice qty 2, issued.
         const customerResponse = await request('POST', '/api/customers', {
             token,
-            body: { name: `Settlement Customer ${stamp}`, email: `settle.customer.${stamp}@example.test` },
+            body: customerFixture({ name: `Settlement Customer ${stamp}`, email: `settle.customer.${stamp}@example.test` }),
         });
         customer = customerResponse.json?.data?.customer;
         check('customer created', customerResponse.status === 201 && Number.isSafeInteger(customer?.id));
 
         const productResponse = await request('POST', '/api/products', {
             token,
-            body: { name: 'Settlement Widget', code: productCode, price: 500, taxRate: 0, stockQuantity: 10 },
+            body: productFixture({ name: 'Settlement Widget', code: productCode, price: 500, taxRate: 0, stockQuantity: 10 }),
         });
         product = productResponse.json?.data?.product;
         check('product created with stock 10', productResponse.status === 201 && product?.stockQuantity === 10);
@@ -317,6 +321,7 @@ async function run() {
             await prisma.invoice.deleteMany({ where: { userId: ownerId } }).catch(() => {});
             await prisma.product.deleteMany({ where: { userId: ownerId } }).catch(() => {});
             await prisma.customer.deleteMany({ where: { userId: ownerId } }).catch(() => {});
+            await prisma.businessProfile.deleteMany({ where: { userId: ownerId } }).catch(() => {});
             await prisma.user.deleteMany({ where: { id: ownerId } }).catch(() => {});
         }
         await prisma.$disconnect();

@@ -36,6 +36,10 @@ model User {
   /// One of: sales | accounts | manager | admin
   role String @default("sales") @db.NVarChar(20)
 
+  /// Seller province used by the internal FBR mock readiness checks. Optional
+  /// because existing accounts may not have captured it yet.
+  businessProvince String? @db.NVarChar(100)
+
   createdAt DateTime @default(now()) @db.DateTime2
   updatedAt DateTime @updatedAt @db.DateTime2
 
@@ -52,6 +56,8 @@ model User {
   creditEntries CustomerCreditEntry[] @relation("CreditEntryCreator")
   creditApplications CreditApplication[] @relation("CreditApplicationActor")
   auditLogs AuditLog[]
+  businessProfile BusinessProfile?
+  mockFbrSubmissions MockFbrSubmission[]
 
   @@index([role])
   @@map("Users")
@@ -76,6 +82,8 @@ model Invoice {
   grandTotal    Decimal   @default(0) @db.Decimal(18, 2)
   notes         String?   @db.NVarChar(2000)
   paidAt        DateTime? @db.DateTime2
+  /// Immutable seller/buyer/classification snapshot captured at issue time.
+  fbrSnapshotJson String? @db.NVarChar(Max)
 
   /// Issue snapshot: when and by whom the draft became immutable.
   issuedAt      DateTime? @db.DateTime2
@@ -110,6 +118,7 @@ model Invoice {
   /// Credit ledger rows sourced from this invoice (issued / return credit / ...).
   creditEntries CustomerCreditEntry[] @relation("CreditSourceInvoice")
   stockMovements StockMovement[]
+  mockFbrSubmission MockFbrSubmission?
 
   @@index([userId, createdAt])
   @@index([userId, status])
@@ -126,10 +135,27 @@ model InvoiceItem {
   productCode  String? @db.NVarChar(50)
   quantity     Int
   unitPrice    Decimal @db.Decimal(18, 2)
+  /// Third Schedule goods are taxed on the printed/notified retail price.
+  /// Snapshotted on the line so later product edits never rewrite history.
+  retailPrice  Decimal? @db.Decimal(18, 2)
   taxRate      Decimal @db.Decimal(5, 2)
   lineSubtotal Decimal @db.Decimal(18, 2)
   lineTax      Decimal @db.Decimal(18, 2)
   lineTotal    Decimal @db.Decimal(18, 2)
+
+  /// Tax/classification snapshot captured when the line is saved so later
+  /// product edits never rewrite historical invoices.
+  hsCode                  String? @db.NVarChar(20)
+  uom                     String? @db.NVarChar(30)
+  saleType                String? @db.NVarChar(30)
+  sroScheduleNo           String? @db.NVarChar(50)
+  sroItemSerialNo         String? @db.NVarChar(30)
+  discount                Decimal @default(0) @db.Decimal(18, 2)
+  extraTax                Decimal @default(0) @db.Decimal(18, 2)
+  furtherTax              Decimal @default(0) @db.Decimal(18, 2)
+  advanceTax              Decimal @default(0) @db.Decimal(18, 2)
+  fedPayable              Decimal @default(0) @db.Decimal(18, 2)
+  salesTaxWithheldAtSource Decimal @default(0) @db.Decimal(18, 2)
 
   invoice Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   product Product? @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction)
@@ -139,6 +165,13 @@ model InvoiceItem {
   @@index([invoiceId])
   @@index([productId])
   @@map("InvoiceItems")
+}
+
+model FbrHsCode {
+  hsCode String @id @db.NVarChar(20)
+  description String @db.NVarChar(Max)
+  updatedAt DateTime @updatedAt @db.DateTime2
+  @@map("FbrHsCodes")
 }
 
 /// A received payment. Only rows with status = 'completed' count as money
@@ -350,6 +383,7 @@ model CustomerCreditEntry {
 
   @@index([customerId, createdAt])
   @@index([sourceReturnId])
+  @@index([sourceInvoiceId])
   @@map("CustomerCreditLedger")
 }
 
@@ -430,9 +464,28 @@ model Customer {
   phone        String?  @db.NVarChar(50)
   companyName  String?  @db.NVarChar(200)
   taxNumber    String?  @db.NVarChar(100)
+  /// FBR buyer classification: 1 End Consumer, 2 Registered Business,
+  /// 3 Unregistered Business, 4 Foreign Buyer/Exporter.
+  /// Nullable so rows created before this field keep working and can be inferred.
+  buyerType    Int?
   registration String?  @db.NVarChar(30)
+  province     String?  @db.NVarChar(50)
+  strn         String?  @db.NVarChar(50)
+  /// Business / Individual. Kept separate from registration type so a
+  /// business client and a sole trader are not conflated.
+  customerType String?  @db.NVarChar(30)
+  /// Filer / non-filer classification, kept separate from registration type
+  /// (e.g. a registered business may be a non-filer).
+  filerStatus  String?  @db.NVarChar(30)
   address      String?  @db.NVarChar(500)
   city         String?  @db.NVarChar(100)
+  /// Tax exemption details (e.g. exemption certificate number / period).
+  taxExemptionDetails String? @db.NVarChar(500)
+  /// Bank account used for settlements, when the customer pays by bank.
+  bankName        String?  @db.NVarChar(100)
+  bankBranch      String?  @db.NVarChar(100)
+  accountTitle    String?  @db.NVarChar(200)
+  accountNumber   String?  @db.NVarChar(60)
   notes        String?  @db.NVarChar(Max)
   createdAt    DateTime @default(now()) @db.DateTime2
   updatedAt    DateTime @updatedAt @db.DateTime2
@@ -459,20 +512,37 @@ model Product {
   /// Normalised to trimmed upper-case, so "sku-1" and "SKU-1" are one code.
   /// Unique per owner; the database collation is case-insensitive as well.
   code          String   @db.NVarChar(50)
-
   description   String?  @db.NVarChar(Max)
   unit          String?  @db.NVarChar(30)
+  /// Physical packing (carton/pack/stick count etc.) per unit.
+  packing       String?  @db.NVarChar(100)
+  /// Weight per unit in kilograms.
+  weight        Decimal  @default(0) @db.Decimal(18, 2)
 
   /// Money is stored as an exact decimal, never a floating-point type.
   price         Decimal  @db.Decimal(18, 2)
 
+  /// Fixed/notified retail price for Third Schedule goods. Optional for the
+  /// other sale types; required by the FBR check when saleType is Third Schedule.
+  retailPrice   Decimal? @db.Decimal(18, 2)
+
   /// Percentage of tax applied to this product, 0-100.
   taxRate       Decimal  @default(0) @db.Decimal(5, 2)
+  /// FBR/PRAL classification and per-product additional tax rates.
+  hsCode                String? @db.NVarChar(20)
+  saleType              String? @db.NVarChar(30)
+  sroScheduleNo         String? @db.NVarChar(50)
+  sroItemSerialNo       String? @db.NVarChar(30)
+  advanceTaxRate        Decimal @default(0) @db.Decimal(5, 2)
+  extraTaxRate          Decimal @default(0) @db.Decimal(5, 2)
+  fedRate               Decimal @default(0) @db.Decimal(5, 2)
+  furtherTaxRate        Decimal @default(0) @db.Decimal(5, 2)
+  salesTaxWithheldRate  Decimal @default(0) @db.Decimal(5, 2)
   stockQuantity Int      @default(0)
   isActive      Boolean  @default(true)
 
   createdAt     DateTime @default(now()) @db.DateTime2
-  updatedAt     DateTime @updatedAt @db.DateTime2
+  updatedAt    DateTime @updatedAt @db.DateTime2
 
   user         User          @relation(fields: [userId], references: [id], onDelete: NoAction)
   invoiceItems InvoiceItem[]
@@ -520,4 +590,52 @@ model StockMovement {
   @@index([returnId])
   @@index([invoiceId])
   @@map("StockMovements")
+}
+
+/// One seller profile per account. No legal tax classification is implied;
+/// the fields are the identity values the internal FBR mock readiness checks
+/// read. A missing row reads as empty defaults.
+model BusinessProfile {
+  id         Int      @id @default(autoincrement())
+  userId     Int      @unique
+  businessName String? @db.NVarChar(200)
+  ntn        String?  @db.NVarChar(50)
+  strn       String?  @db.NVarChar(50)
+  province   String?  @db.NVarChar(50)
+  address    String?  @db.NVarChar(500)
+  email      String?  @db.NVarChar(320)
+  phone      String?  @db.NVarChar(50)
+  createdAt  DateTime @default(now()) @db.DateTime2
+  updatedAt  DateTime @updatedAt @db.DateTime2
+
+  user User @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@map("BusinessProfiles")
+}
+
+/// Internal FBR/PRAL-style mock submission record. One row per invoice,
+/// replay-safe: a second validate/submit on an already-submitted invoice
+
+/// keeps the "Submitted" state and returns the original result instead of a
+/// duplicate row. Stores the PRAL-v1.12-style payload and the validation
+
+/// result locally; never talks to FBR.
+model MockFbrSubmission {
+  id             Int      @id @default(autoincrement())
+  invoiceId      Int      @unique
+  reference      String   @unique @db.NVarChar(60)
+  status         String   @db.NVarChar(30)
+  payloadJson    String?  @db.NVarChar(Max)
+  validationJson String?  @db.NVarChar(Max)
+  validatedAt    DateTime? @db.DateTime2
+  submittedAt    DateTime? @db.DateTime2
+  createdBy      Int
+  createdAt      DateTime @default(now()) @db.DateTime2
+  updatedAt      DateTime @updatedAt @db.DateTime2
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  creator User @relation(fields: [createdBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([status])
+  @@map("MockFbrSubmissions")
 }

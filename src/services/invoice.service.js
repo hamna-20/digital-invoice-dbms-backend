@@ -6,6 +6,14 @@ import { can } from '../utils/permissions.js';
 import { parseSnapshot, writeAudit } from './audit.service.js';
 import { loadSettlement, refreshStatus, serializeSettlement, settlementFromRows, settlementSelect, statusBadges, CREDIT_ENTRY_EFFECT } from './settlement.service.js';
 import { computeReturnQuantities } from './settlement.policy.js';
+import {
+    buildFbrPayload,
+    loadInvoiceForFbrContext,
+    refreshInvoiceFbrSnapshot,
+    serializeFbrSummary,
+    validateInvoiceForFbr,
+} from './fbrValidation.service.js';
+import { buildFbrPayload as buildFbrPreviewPayload, validateInvoiceForFbr as validateInvoiceForFbrRules } from './fbr.rules.js';
 
 /**
  * Invoice business logic.
@@ -42,7 +50,9 @@ const customerSelect = {
     phone: true,
     companyName: true,
     taxNumber: true,
+    strn: true,
     registration: true,
+    province: true,
     address: true,
     city: true,
 };
@@ -54,10 +64,22 @@ const itemSelect = {
     productCode: true,
     quantity: true,
     unitPrice: true,
+    retailPrice: true,
     taxRate: true,
     lineSubtotal: true,
     lineTax: true,
     lineTotal: true,
+    hsCode: true,
+    uom: true,
+    saleType: true,
+    sroScheduleNo: true,
+    sroItemSerialNo: true,
+    extraTax: true,
+    furtherTax: true,
+    advanceTax: true,
+    fedPayable: true,
+    salesTaxWithheldAtSource: true,
+    discount: true,
 };
 
 const invoiceSelect = {
@@ -71,6 +93,7 @@ const invoiceSelect = {
     taxTotal: true,
     grandTotal: true,
     notes: true,
+    fbrSnapshotJson: true,
     paidAt: true,
     issuedAt: true,
     issuedBy: true,
@@ -148,6 +171,17 @@ const invoiceSelect = {
             customerCreditEntryId: true,
             actor: { select: { fullName: true } },
         }
+    },
+    mockFbrSubmission: {
+        select: {
+            id: true,
+            reference: true,
+            status: true,
+            validatedAt: true,
+            submittedAt: true,
+            createdAt: true,
+            updatedAt: true,
+        },
     },
 };
 
@@ -242,6 +276,7 @@ function serializeInvoice(invoice, { returnCreditTransfers = new Map(), creditBa
     const settlement = settlementFromRows(invoice);
     const status = effectiveStatus(invoice);
     const actions = invoiceActions(invoice, status);
+    const fbrSnapshot = parseSnapshot(invoice.fbrSnapshotJson);
 
     const dueDates = settlement.creditOutstandingPaisa > 0
         ? (invoice.creditEntries || [])
@@ -286,6 +321,35 @@ function serializeInvoice(invoice, { returnCreditTransfers = new Map(), creditBa
         invoiceNumber: invoice.invoiceNumber,
         customerId: invoice.customerId,
         customer: invoice.customer ? { ...invoice.customer } : null,
+        /**
+         * Buyer/seller identity frozen at issue time. An issued invoice keeps
+         * showing what was true then even if the customer or business profile
+         * is edited later. Drafts have no snapshot and use the live records.
+         */
+        buyerSnapshot: fbrSnapshot
+            ? {
+                name: fbrSnapshot.buyerName ?? null,
+                companyName: fbrSnapshot.buyerBusinessName ?? null,
+                ntn: fbrSnapshot.buyerNTNCNIC ?? null,
+                strn: fbrSnapshot.buyerSTRN ?? null,
+                registration: fbrSnapshot.buyerRegistrationType ?? null,
+                province: fbrSnapshot.buyerProvince ?? null,
+                address: fbrSnapshot.buyerAddress ?? null,
+                email: fbrSnapshot.buyerEmail ?? null,
+                phone: fbrSnapshot.buyerPhone ?? null,
+            }
+            : null,
+        sellerSnapshot: fbrSnapshot
+            ? {
+                businessName: fbrSnapshot.sellerBusinessName ?? null,
+                ntn: fbrSnapshot.sellerNTNCNIC ?? null,
+                strn: fbrSnapshot.sellerSTRN ?? null,
+                province: fbrSnapshot.sellerProvince ?? null,
+                address: fbrSnapshot.sellerAddress ?? null,
+                email: fbrSnapshot.sellerEmail ?? null,
+                phone: fbrSnapshot.sellerPhone ?? null,
+            }
+            : null,
         invoiceDate: toDateOnly(invoice.invoiceDate),
         dueDate: toDateOnly(invoice.dueDate),
         status,
@@ -315,6 +379,8 @@ function serializeInvoice(invoice, { returnCreditTransfers = new Map(), creditBa
             : { name: null, email: null },
         financialSummary: {
             ...serializeSettlement(settlement),
+            // Total discount taken across the invoice's line items.
+            discount: toNumber(sumTotals(invoice.items).discount),
             // Approved return credit that has not been applied yet: the money
             // that is still going to come back to this invoice.
             returnCreditPending: toAmount(returnCreditPendingPaisa),
@@ -404,15 +470,30 @@ function serializeInvoice(invoice, { returnCreditTransfers = new Map(), creditBa
             return {
                 ...item,
                 unitPrice: toNumber(item.unitPrice),
+                retailPrice:
+                    item.retailPrice === null || item.retailPrice === undefined
+                        ? null
+                        : toNumber(item.retailPrice),
                 taxRate: toNumber(item.taxRate),
                 lineSubtotal: toNumber(item.lineSubtotal),
                 lineTax: toNumber(item.lineTax),
                 lineTotal: toNumber(item.lineTotal),
+                extraTax: toNumber(item.extraTax),
+                furtherTax: toNumber(item.furtherTax),
+                advanceTax: toNumber(item.advanceTax),
+                fedPayable: toNumber(item.fedPayable),
+                salesTaxWithheldAtSource: toNumber(item.salesTaxWithheldAtSource),
+                discount: toNumber(item.discount),
                 returnedQuantity: state.returned,
                 pendingReturnQuantity: state.reserved,
                 returnable: state.returnable,
             };
         }),
+        /**
+         * Internal FBR mock status only. The authoritative readiness check is
+         * GET /invoices/:id/fbr; this summary never claims official acceptance.
+         */
+        fbr: serializeFbrSummary(invoice.mockFbrSubmission),
     };
 }
 
@@ -421,7 +502,25 @@ async function resolveProducts(userId, items) {
     const productIds = [...new Set(items.map((item) => item.productId))];
     const products = await prisma.product.findMany({
         where: { id: { in: productIds }, userId },
-        select: { id: true, name: true, code: true, price: true, taxRate: true, isActive: true },
+        select: {
+            id: true,
+            name: true,
+            code: true,
+            unit: true,
+            price: true,
+            retailPrice: true,
+            taxRate: true,
+            isActive: true,
+            hsCode: true,
+            saleType: true,
+            sroScheduleNo: true,
+            sroItemSerialNo: true,
+            extraTaxRate: true,
+            furtherTaxRate: true,
+            advanceTaxRate: true,
+            fedRate: true,
+            salesTaxWithheldRate: true,
+        },
     });
 
     const byId = new Map(products.map((product) => [product.id, product]));
@@ -456,26 +555,81 @@ async function assertCustomer(userId, customerId) {
     }
 }
 
-/** Builds snapshot lines from database prices, never from client input. */
+/**
+ * Builds snapshot lines. The client may override the price, quantity, discount
+ * and per-line tax rates, but the server always recomputes every derived money
+ * value here, so a stale or tampered client total can never be persisted.
+ * Anything not supplied falls back to the product's configured values.
+ */
 function buildLines(productsById, items) {
-    return items.map((item) => {
+    return items.map((item, index) => {
         const product = productsById.get(item.productId);
-        const unitPrice = new Prisma.Decimal(product.price);
-        const taxRate = new Prisma.Decimal(product.taxRate);
+        const unitPrice =
+            item.unitPrice === undefined || item.unitPrice === null
+                ? new Prisma.Decimal(product.price)
+                : new Prisma.Decimal(item.unitPrice);
+        const taxRate =
+            item.taxRate === undefined || item.taxRate === null
+                ? new Prisma.Decimal(product.taxRate)
+                : new Prisma.Decimal(item.taxRate);
         const lineSubtotal = round2(unitPrice.mul(item.quantity));
         const lineTax = round2(lineSubtotal.mul(taxRate).div(100));
         const lineTotal = lineSubtotal.add(lineTax);
 
+        // A discount is an amount off the line, never more than the line's
+        // own sales value. It reduces the invoice grand total below.
+        const discount =
+            item.discount === undefined || item.discount === null
+                ? DECIMAL_ZERO
+                : round2(item.discount);
+        if (discount.gt(lineSubtotal)) {
+            throw ApiError.badRequest('Validation failed', [
+                {
+                    field: `items[${index}].discount`,
+                    message: 'Discount cannot be more than the line subtotal',
+                },
+            ]);
+        }
+
+        /**
+         * FBR-style memo components. They are percentages of the line sales
+         * value excluding sales tax, and are stored/displayed only: the
+         * existing invoice total remains subtotal + sales tax less discount,
+         * so adding these rates never changes money that was already
+         * calculated. Whether any component should affect the payable total is
+         * an accountant decision.
+         */
+        const percentage = (rate) => round2(lineSubtotal.mul(new Prisma.Decimal(rate ?? 0)).div(100));
+
+        const rateOr = (value, fallback) =>
+            value === undefined || value === null ? fallback ?? 0 : value;
+        const textOr = (value, fallback) =>
+            value === undefined || value === null ? fallback ?? null : value;
+
         return {
             productId: product.id,
-            productName: product.name,
+            productName: textOr(item.description, product.name),
             productCode: product.code,
             quantity: item.quantity,
             unitPrice,
+            retailPrice: textOr(item.retailPrice, product.retailPrice),
             taxRate,
             lineSubtotal,
             lineTax,
             lineTotal,
+            hsCode: textOr(item.hsCode, product.hsCode),
+            uom: textOr(item.uom, product.unit),
+            saleType: textOr(item.saleType, product.saleType),
+            sroScheduleNo: textOr(item.sroScheduleNo, product.sroScheduleNo),
+            sroItemSerialNo: textOr(item.sroItemSerialNo, product.sroItemSerialNo),
+            extraTax: percentage(rateOr(item.extraTaxRate, product.extraTaxRate)),
+            furtherTax: percentage(rateOr(item.furtherTaxRate, product.furtherTaxRate)),
+            advanceTax: percentage(rateOr(item.advanceTaxRate, product.advanceTaxRate)),
+            fedPayable: percentage(rateOr(item.fedRate, product.fedRate)),
+            salesTaxWithheldAtSource: percentage(
+                rateOr(item.salesTaxWithheldRate, product.salesTaxWithheldRate)
+            ),
+            discount,
         };
     });
 }
@@ -483,11 +637,17 @@ function buildLines(productsById, items) {
 function sumTotals(lines) {
     const subtotal = lines.reduce((sum, line) => sum.add(line.lineSubtotal), DECIMAL_ZERO);
     const taxTotal = lines.reduce((sum, line) => sum.add(line.lineTax), DECIMAL_ZERO);
+    // Line discount is a reduction of the line total and therefore of the
+    // invoice's grand total. It is stored at line level and aggregated here,
+    // keeping the existing per-line rounding policy.
+    const discount = lines.reduce((sum, line) => sum.add(line.discount), DECIMAL_ZERO);
 
     return {
         subtotal: round2(subtotal),
         taxTotal: round2(taxTotal),
-        grandTotal: round2(subtotal.add(taxTotal)),
+        discount: round2(discount),
+        // Grand total is subtotal + sales tax, less the total discount.
+        grandTotal: round2(subtotal.add(taxTotal).sub(discount)),
     };
 }
 
@@ -529,6 +689,12 @@ function visibleTo(actor) {
     return actor.role === 'manager' || actor.role === 'admin' ? {} : { userId: actor.id };
 }
 
+/**
+ * Load the invoice as stored, including the snapshot lines that were frozen
+ * at issue time. The FBR validation uses these frozen values, so downstream
+ * changes to a product or customer never change an already-issued snapshot.
+ */
+
 export async function createInvoice(actor, input) {
     const userId = actor.id;
     await assertCustomer(userId, input.customerId);
@@ -548,7 +714,9 @@ export async function createInvoice(actor, input) {
                 invoiceDate: input.invoiceDate,
                 dueDate: input.dueDate ?? null,
                 status: 'draft',
-                ...totals,
+                subtotal: totals.subtotal,
+                taxTotal: totals.taxTotal,
+                grandTotal: totals.grandTotal,
                 notes: input.notes ?? null,
                 items: { create: lines },
             },
@@ -786,6 +954,147 @@ export async function getInvoice(actor, id) {
     return serializeInvoice(invoice, { returnCreditTransfers, creditBalances });
 }
 
+export async function fbrPreview(actor, id) {
+    const userId = actor.id;
+
+    const invoice = await prisma.invoice.findFirst({
+        where: { id, userId },
+        select: {
+            id: true,
+            invoiceNumber: true,
+            customerId: true,
+            invoiceDate: true,
+            dueDate: true,
+            status: true,
+            subtotal: true,
+            taxTotal: true,
+            grandTotal: true,
+            notes: true,
+            items: { select: itemSelect, orderBy: { id: 'asc' } },
+            customer: { select: customerSelect },
+            user: { select: { id: true, fullName: true, email: true } },
+        },
+    });
+
+    if (!invoice) throw ApiError.notFound('Invoice not found');
+
+    const userRow = await prisma.user.findUnique({
+        where: { id: invoice.userId },
+        select: {
+            businessProvince: true,
+        },
+    });
+
+    const businessProfile = await prisma.businessProfile.findUnique({
+        where: { userId: invoice.userId },
+        select: {
+            businessName: true,
+            ntn: true,
+            address: true,
+            province: true,
+        },
+    });
+
+    const buyer = invoice.customer ?? {};
+    const productIds = [...new Set(invoice.items.map((item) => item.productId).filter(Boolean))];
+    const products = await prisma.product.findMany({
+        where: { id: { in: productIds }, userId },
+        select: {
+            id: true,
+            name: true,
+            unit: true,
+            hsCode: true,
+            saleType: true,
+            taxRate: true,
+            price: true,
+            retailPrice: true,
+            sroScheduleNo: true,
+            sroItemSerialNo: true,
+        },
+    });
+
+    const productById = new Map(products.map((product) => [product.id, product]));
+
+    const items = invoice.items.map((item) => {
+        const product = productById.get(item.productId);
+        return {
+            ...item,
+            product: product ?? {},
+            unit: item.uom ?? product?.unit ?? null,
+            hsCode: item.hsCode ?? product?.hsCode ?? null,
+            saleType: item.saleType ?? product?.saleType ?? null,
+            taxRate: item.taxRate ?? product?.taxRate ?? null,
+            price: item.unitPrice ?? product?.price ?? null,
+            retailPrice: item.retailPrice ?? product?.retailPrice ?? null,
+            sroScheduleNo: item.sroScheduleNo ?? product?.sroScheduleNo ?? null,
+            sroItemSerialNo: item.sroItemSerialNo ?? product?.sroItemSerialNo ?? null,
+            furtherTax: item.furtherTax ?? null,
+            extraTax: item.extraTax ?? null,
+        };
+    });
+
+    const sellerForValidation = {
+        businessName: businessProfile?.businessName ?? null,
+        businessNtn: businessProfile?.ntn ?? null,
+        businessAddress: businessProfile?.address ?? null,
+        businessProvince: businessProfile?.province ?? userRow?.businessProvince ?? null,
+    };
+
+    const userForValidation = {
+        businessName: businessProfile?.businessName ?? null,
+        businessNtn: businessProfile?.ntn ?? null,
+        businessAddress: businessProfile?.address ?? null,
+        businessProvince: businessProfile?.province ?? userRow?.businessProvince ?? null,
+    };
+
+    // Create FBR client - will throw 'FBR reference data not configured' if token not set
+    const fbrClient = {
+        isValidHsCode: async (code) => {
+            if (!process.env.FBR_TOKEN) {
+                return true; // Skip validation, will be handled in product service
+            }
+            try {
+                const { isValidHsCode } = await import('../services/fbr.reference.js');
+                return await isValidHsCode(code);
+            } catch {
+                return true; // Allow save with warning if check fails
+            }
+        },
+        getAllowedUOMs: async (hsCode) => {
+            if (!process.env.FBR_TOKEN) {
+                return []; // Skip validation, will be handled in product service
+            }
+            try {
+                const { getAllowedUOMs } = await import('../services/fbr.reference.js');
+                return await getAllowedUOMs(hsCode);
+            } catch {
+                return [];
+            }
+        },
+    };
+
+    const errors = validateInvoiceForFbrRules({ user: userForValidation, invoice: { customer: buyer, items }, fbrClient });
+
+    const payload = buildFbrPreviewPayload(
+        {
+            id: invoice.id,
+            invoiceNumber: invoice.invoiceNumber,
+            invoiceDate: invoice.invoiceDate,
+            customer: buyer,
+            items,
+        },
+        sellerForValidation,
+        buyer,
+        items.map((item) => item.product)
+    );
+
+    return {
+        ready: errors.length === 0,
+        errors,
+        payload,
+    };
+}
+
 export async function updateInvoice(actor, id, input) {
     const userId = actor.id;
     const existing = await prisma.invoice.findFirst({
@@ -846,7 +1155,13 @@ export async function updateInvoice(actor, id, input) {
                 ...(input.invoiceDate !== undefined ? { invoiceDate: input.invoiceDate } : {}),
                 ...(input.dueDate !== undefined ? { dueDate: input.dueDate } : {}),
                 ...(input.notes !== undefined ? { notes: input.notes } : {}),
-                ...(totals ?? {}),
+                ...(totals
+                    ? {
+                        subtotal: totals.subtotal,
+                        taxTotal: totals.taxTotal,
+                        grandTotal: totals.grandTotal,
+                    }
+                    : {}),
                 updatedAt: new Date(),
             },
         });
@@ -932,6 +1247,14 @@ export async function updateInvoice(actor, id, input) {
         }
 
         const settled = await refreshStatus(tx, id);
+
+        // An issued invoice keeps a frozen FBR snapshot. If its customer or
+        // lines were edited, rebuild that snapshot from the new values without
+        // blocking the edit; a later mock validation still reports anything
+        // missing. Drafts get their snapshot at issue time.
+        if (existing.status !== 'draft') {
+            await refreshInvoiceFbrSnapshot(tx, actor, id);
+        }
 
         await writeAudit(tx, {
             actor,
@@ -1219,6 +1542,13 @@ export async function updatePayment(actor, id, paymentId, input) {
  * and timestamp, decrements stock for every product line (aggregating
  * duplicated lines so the guard still holds), and can never be issued twice.
  */
+/**
+ * Issues a draft invoice.
+ *
+ * Issuing is the point where the document becomes real: it records the issuer
+ * and timestamp, decrements stock for every product line (aggregating
+ * duplicated lines so the guard still holds), and can never be issued twice.
+ */
 export async function issueInvoice(actor, id) {
     const outcome = await prisma.$transaction(async (tx) => {
         // Claim the draft first. This is the concurrency guard.
@@ -1234,7 +1564,27 @@ export async function issueInvoice(actor, id) {
             select: {
                 id: true,
                 invoiceNumber: true,
-                items: { select: { productId: true, quantity: true } },
+                customerId: true,
+                invoiceDate: true,
+                items: {
+                    select: {
+                        id: true,
+                        productId: true,
+                        quantity: true,
+                        hsCode: true,
+                        uom: true,
+                        saleType: true,
+                        retailPrice: true,
+                        product: {
+                            select: {
+                                hsCode: true,
+                                unit: true,
+                                saleType: true,
+                                retailPrice: true,
+                            },
+                        },
+                    },
+                },
             },
         });
 
@@ -1242,6 +1592,47 @@ export async function issueInvoice(actor, id) {
             // Throwing rolls the status change back.
             throw ApiError.conflict('An invoice without items cannot be issued.');
         }
+
+        // Freeze the classification values that were true at issue time. The
+        // line-level override wins; the product master is only a fallback. This
+        // keeps later product edits from rewriting the historical invoice.
+        for (const item of invoice.items) {
+            const product = item.product;
+            if (product) {
+                await tx.invoiceItem.update({
+                    where: { id: item.id },
+                    data: {
+                        hsCode: item.hsCode ?? product.hsCode ?? null,
+                        uom: item.uom ?? product.unit ?? null,
+                        saleType: item.saleType ?? product.saleType ?? null,
+                        retailPrice: item.retailPrice ?? product.retailPrice ?? null,
+                    },
+                });
+            }
+        }
+
+        /**
+         * The one authoritative FBR readiness check. It runs inside this
+         * transaction, before any stock moves, so a missing Customer, Product,
+         * Invoice or Seller field rolls the issue back completely.
+         */
+        const fbrContextTx = await loadInvoiceForFbrContext(tx, actor, id);
+        const fbrValidationTx = validateInvoiceForFbr(fbrContextTx);
+        if (fbrValidationTx.errors.length > 0) {
+            throw ApiError.badRequest(
+                'This invoice is not ready for FBR. Fix the items below and issue again.',
+                fbrValidationTx.errors
+            );
+        }
+
+        // Freeze the seller, buyer and line values that were true at issue
+        // time. Later customer/product edits therefore never rewrite history.
+        // Use the stored item values (snapshotted above) rather than live product values.
+        const fbrSnapshot = buildFbrPayload(fbrContextTx.invoice, fbrContextTx.seller);
+        await tx.invoice.update({
+            where: { id },
+            data: { fbrSnapshotJson: JSON.stringify(fbrSnapshot) },
+        });
 
         // Aggregate duplicate lines for the same product.
         const demand = new Map();

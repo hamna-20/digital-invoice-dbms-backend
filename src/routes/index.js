@@ -6,6 +6,7 @@ import invoiceRoutes from './invoice.routes.js';
 import productRoutes from './product.routes.js';
 import reportRoutes from './report.routes.js';
 import financialRoutes from './financial.routes.js';
+import businessProfileRoutes from './businessProfile.routes.js';
 
 const router = express.Router();
 
@@ -32,5 +33,7 @@ router.use('/invoices', invoiceRoutes);
 router.use('/reports', reportRoutes);
 router.use('/dashboard', dashboardRoutes);
 router.use('/', financialRoutes);
+router.use('/seller', businessProfileRoutes);
+
 
 export default router;

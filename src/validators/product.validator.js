@@ -6,10 +6,29 @@
  * controllers/services never read req.body directly.
  */
 
+import { FBR_SALE_TYPES } from '../utils/fbr.js';
+
 const TEXT_LIMITS = {
     name: 200,
     description: 4000,
     unit: 30,
+    hsCode: 20,
+    saleType: 100,
+    sroScheduleNo: 50,
+    sroItemSerialNo: 50,
+    packing: 100,
+};
+
+// Decimal(18,2) holds more than JavaScript can represent exactly.
+// This ceiling keeps the scaled value inside the safe-integer range.
+const MAX_WEIGHT = 999999999999999.99;
+
+const FBR_RATE_FIELDS = {
+    extraTaxRate: 'Extra tax rate',
+    furtherTaxRate: 'Further tax rate',
+    advanceTaxRate: 'Advance tax rate',
+    fedRate: 'FED rate',
+    salesTaxWithheldRate: 'Sales tax withheld rate',
 };
 
 const BODY_FIELDS = new Set([
@@ -17,10 +36,18 @@ const BODY_FIELDS = new Set([
     'code',
     'description',
     'unit',
+    'packing',
+    'weight',
     'price',
     'taxRate',
     'stockQuantity',
     'isActive',
+    'hsCode',
+    'saleType',
+    'sroScheduleNo',
+    'sroItemSerialNo',
+    'retailPrice',
+    ...Object.keys(FBR_RATE_FIELDS),
 ]);
 
 const QUERY_FIELDS = new Set(['page', 'limit', 'search', 'isActive', 'unit']);
@@ -168,27 +195,28 @@ function validateProductBody(body, partial) {
                 value.code = code;
             }
         }
+    }    for (const field of ['description', 'unit', 'hsCode', 'saleType', 'sroScheduleNo', 'sroItemSerialNo', 'packing']) {        if (partial && !Object.hasOwn(body, field)) continue;        const input = body[field];        if (isBlank(input)) {            value[field] = null;            continue;        }        if (typeof input !== 'string') {            errors.push({ field, message: 'Must be a string or null' });            continue;        }        const normalized = field === 'unit' ? collapseWhitespace(input).toLowerCase() : input.trim();        if (normalized.length > TEXT_LIMITS[field]) {            errors.push({ field, message: `Must be at most ${TEXT_LIMITS[field]} characters` });        } else {            value[field] = normalized || null;        }    }    if (Object.hasOwn(body, 'weight')) {        const weight = parseDecimal('weight', body.weight, MAX_WEIGHT, 'Weight', errors);        if (weight !== undefined) value.weight = weight;    }    for (const [field, label] of Object.entries(FBR_RATE_FIELDS)) {        const present = Object.hasOwn(body, field);        if (partial && !present) continue;        if (!present || isBlank(body[field])) {            value[field] = 0;            continue;        }        const rate = parseDecimal(field, body[field], MAX_TAX_RATE, label, errors);        if (rate !== undefined) value[field] = rate;    }
+
+    if (!partial || Object.hasOwn(body, 'retailPrice')) {
+        if (isBlank(body.retailPrice)) {
+            value.retailPrice = null;
+        } else {
+            const retailPrice = parseDecimal(
+                'retailPrice',
+                body.retailPrice,
+                MAX_PRICE,
+                'Retail price',
+                errors
+            );
+            if (retailPrice !== undefined) value.retailPrice = retailPrice;
+        }
     }
 
-    for (const field of ['description', 'unit']) {
-        if (partial && !Object.hasOwn(body, field)) continue;
-
-        const input = body[field];
-        if (isBlank(input)) {
-            value[field] = null;
-            continue;
-        }
-        if (typeof input !== 'string') {
-            errors.push({ field, message: 'Must be a string or null' });
-            continue;
-        }
-
-        const normalized = field === 'unit' ? collapseWhitespace(input).toLowerCase() : input.trim();
-        if (normalized.length > TEXT_LIMITS[field]) {
-            errors.push({ field, message: `Must be at most ${TEXT_LIMITS[field]} characters` });
-        } else {
-            value[field] = normalized || null;
-        }
+    if (value.saleType && !FBR_SALE_TYPES.includes(value.saleType)) {
+        errors.push({
+            field: 'saleType',
+            message: `Sale type must be one of: ${FBR_SALE_TYPES.join(', ')}`,
+        });
     }
 
     if (!partial || Object.hasOwn(body, 'price')) {

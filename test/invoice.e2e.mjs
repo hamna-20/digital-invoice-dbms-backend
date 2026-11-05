@@ -4,6 +4,7 @@
  * Run with: node test/invoice.e2e.mjs
  */
 import prisma from '../src/db/prisma.js';
+import { customerFixture, ensureSellerProfile, productFixture } from './fbr-fixtures.mjs';
 
 const BASE = process.env.API_BASE_URL || 'http://localhost:5000';
 const stamp = Date.now();
@@ -69,16 +70,19 @@ async function createTestUser(address, isOwner) {
         body: { email: address, password },
     });
     check(`signin test user (${isOwner ? 'owner' : 'second user'})`, signin.status === 200, `status=${signin.status}`);
-    return signin.json?.data?.token;
+    const token = signin.json?.data?.token;
+    const seller = await ensureSellerProfile(request, token);
+    check(`seller profile ready (${isOwner ? 'owner' : 'second user'})`, seller.status === 200, `status=${seller.status}`);
+    return token;
 }
 
 async function createProduct(token, body) {
-    const response = await request('POST', '/api/products', { token, body });
+    const response = await request('POST', '/api/products', { token, body: productFixture(body) });
     return { response, product: response.json?.data?.product };
 }
 
 async function createCustomer(token, body) {
-    const response = await request('POST', '/api/customers', { token, body });
+    const response = await request('POST', '/api/customers', { token, body: customerFixture(body) });
     return { response, customer: response.json?.data?.customer };
 }
 
@@ -842,6 +846,7 @@ async function run() {
             await prisma.invoice.deleteMany({ where: { userId: id } }).catch(() => {});
             await prisma.product.deleteMany({ where: { userId: id } }).catch(() => {});
             await prisma.customer.deleteMany({ where: { userId: id } }).catch(() => {});
+            await prisma.businessProfile.deleteMany({ where: { userId: id } }).catch(() => {});
             await prisma.user.deleteMany({ where: { id } }).catch(() => {});
         }
         await prisma.$disconnect();

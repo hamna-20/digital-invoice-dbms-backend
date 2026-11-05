@@ -10,7 +10,47 @@
  */
 
 const CREATE_FIELDS = new Set(['customerId', 'invoiceDate', 'dueDate', 'notes', 'items']);
-const ITEM_FIELDS = new Set(['productId', 'quantity']);
+const ITEM_FIELDS = new Set([
+    'productId',
+    'quantity',
+    'unitPrice',
+    'retailPrice',
+    'taxRate',
+    'discount',
+    'description',
+    'hsCode',
+    'uom',
+    'saleType',
+    'sroScheduleNo',
+    'sroItemSerialNo',
+    'extraTaxRate',
+    'furtherTaxRate',
+    'advanceTaxRate',
+    'fedRate',
+    'salesTaxWithheldRate',
+]);
+
+const FBR_SALE_TYPES = new Set(['Taxable', 'Exempt', 'Zero-rated', 'Third Schedule']);
+const ITEM_TEXT_LIMITS = {
+    description: 200,
+    hsCode: 20,
+    uom: 30,
+    saleType: 30,
+    sroScheduleNo: 50,
+    sroItemSerialNo: 50,
+};
+const ITEM_RATE_FIELDS = new Set([
+    'taxRate',
+    'extraTaxRate',
+    'furtherTaxRate',
+    'advanceTaxRate',
+    'fedRate',
+    'salesTaxWithheldRate',
+]);
+// DECIMAL(18,2) can hold more than JavaScript can represent exactly. This
+// ceiling keeps the scaled value inside the safe-integer range.
+const MAX_ITEM_AMOUNT = 9999999999999.99;
+const MAX_TAX_RATE = 100;
 const QUERY_FIELDS = new Set(['page', 'limit', 'search', 'status', 'customerId', 'from', 'to']);
 
 const STATUSES = new Set(['draft', 'issued', 'partially_paid', 'paid', 'overdue', 'cancelled', 'void']);
@@ -115,7 +155,77 @@ function parseNotes(input, errors) {
     return notes || null;
 }
 
-/** Validates an items array and returns only { productId, quantity }. */
+const DECIMAL_PATTERN = /^-?(?:\d+(?:\.\d*)?|\.\d+)$/;
+
+/**
+ * Parses an optional non-negative decimal with at most two decimal places.
+ * The service still recomputes every derived amount, so this only guards the
+ * inputs that the editor is allowed to override.
+ */
+function parseOptionalDecimal(field, input, label, maximum, errors) {
+    if (isBlank(input)) return null;
+
+    let text;
+    if (typeof input === 'number') {
+        if (!Number.isFinite(input)) {
+            errors.push({ field, message: `${label} must be a finite number` });
+            return undefined;
+        }
+        text = String(input);
+    } else if (typeof input === 'string') {
+        text = input.trim();
+    } else {
+        errors.push({ field, message: `${label} must be a number` });
+        return undefined;
+    }
+
+    if (!DECIMAL_PATTERN.test(text)) {
+        errors.push({ field, message: `${label} must be a number` });
+        return undefined;
+    }
+
+    const normalized = text.endsWith('.') ? text.slice(0, -1) : text;
+    if ((normalized.split('.')[1] || '').length > 2) {
+        errors.push({ field, message: `${label} must have at most 2 decimal places` });
+        return undefined;
+    }
+
+    const number = Number(normalized);
+    if (!Number.isFinite(number)) {
+        errors.push({ field, message: `${label} must be a finite number` });
+        return undefined;
+    }
+    if (number < 0) {
+        errors.push({ field, message: `${label} must not be negative` });
+        return undefined;
+    }
+    if (number > maximum) {
+        errors.push({ field, message: `${label} must be no greater than ${maximum}` });
+        return undefined;
+    }
+
+    return number === 0 ? 0 : number;
+}
+
+function parseOptionalText(field, input, label, maximum, errors) {
+    if (isBlank(input)) return null;
+    if (typeof input !== 'string') {
+        errors.push({ field, message: `${label} must be a string or null` });
+        return undefined;
+    }
+
+    const text = input.trim();
+    if (text.length > maximum) {
+        errors.push({ field, message: `${label} must be at most ${maximum} characters` });
+        return undefined;
+    }
+    return text || null;
+}
+
+/**
+ * Validates an items array. Only explicitly supported fields are returned;
+ * derived money and totals are always recalculated by the service.
+ */
 function parseItems(input, errors) {
     if (isBlank(input)) {
         errors.push({ field: 'items', message: 'At least one invoice item is required' });
@@ -175,7 +285,46 @@ function parseItems(input, errors) {
         }
 
         if (productId !== undefined && quantity !== undefined) {
-            items.push({ productId, quantity });
+            const item = { productId, quantity };
+
+            for (const [field, maximum] of Object.entries(ITEM_TEXT_LIMITS)) {
+                if (!Object.hasOwn(raw, field)) continue;
+                const parsed = parseOptionalText(
+                    `${suffix}.${field}`,
+                    raw[field],
+                    field === 'description' ? 'Description' : field,
+                    maximum,
+                    errors
+                );
+                if (parsed !== undefined) item[field] = parsed;
+            }
+
+            if (item.saleType && !FBR_SALE_TYPES.has(item.saleType)) {
+                errors.push({
+                    field: `${suffix}.saleType`,
+                    message: `Sale type must be one of: ${[...FBR_SALE_TYPES].join(', ')}`,
+                });
+            }
+
+            for (const field of ['unitPrice', 'retailPrice', 'discount', ...ITEM_RATE_FIELDS]) {
+                if (!Object.hasOwn(raw, field)) continue;
+                const maximum =
+                    field === 'unitPrice' || field === 'retailPrice' || field === 'discount'
+                        ? MAX_ITEM_AMOUNT
+                        : MAX_TAX_RATE;
+                const label =
+                    field === 'unitPrice'
+                        ? 'Unit price'
+                        : field === 'retailPrice'
+                            ? 'Retail price'
+                            : field === 'discount'
+                                ? 'Discount'
+                                : field.replace(/([A-Z])/g, ' $1').toLowerCase();
+                const parsed = parseOptionalDecimal(`${suffix}.${field}`, raw[field], label, maximum, errors);
+                if (parsed !== undefined) item[field] = parsed;
+            }
+
+            items.push(item);
         }
     });
 

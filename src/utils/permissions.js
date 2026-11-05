@@ -27,6 +27,9 @@ export const PERMISSIONS = {
     'credit.apply': EVERY_ROLE,
     'credit.reverse': EVERY_ROLE,
     'invoice.void': EVERY_ROLE,
+    'invoice.fbr_mock_read': EVERY_ROLE,
+    'invoice.fbr_mock_validate': EVERY_ROLE,
+    'invoice.fbr_mock_submit': EVERY_ROLE,
     'user.manage': EVERY_ROLE,
     'audit.read': EVERY_ROLE,
 };

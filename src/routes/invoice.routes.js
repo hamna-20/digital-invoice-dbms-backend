@@ -18,6 +18,7 @@ import {
     validateCreateReturn,
     validateReturnRejection,
 } from '../validators/financial.validator.js';
+import * as invoiceFbrController from '../controllers/invoiceFbr.controller.js';
 
 const router = express.Router();
 
@@ -106,6 +107,7 @@ router.patch(
 /* --------------------------- invoice ---------------------------- */
 router.get('/:id', validateId, invoiceController.getById);
 router.get('/:id/timeline', validateId, invoiceController.timeline);
+router.get('/:id/fbr-preview', validateId, requirePermission('invoice.read'), invoiceController.fbrPreview);
 router.put(
     '/:id',
     validateId,
@@ -139,5 +141,20 @@ router.patch(
     invoiceController.voidInvoice
 );
 router.delete('/:id', validateId, requirePermission('invoice.edit_draft'), invoiceController.remove);
+
+/* ---------- FBR mock helpers (internal-only) ---------- */
+router.get('/:id/fbr', validateId, requirePermission('invoice.fbr_mock_read'), invoiceFbrController.getFbr);
+router.post(
+    '/:id/fbr/validate',
+    validateId,
+    requirePermission('invoice.fbr_mock_validate'),
+    invoiceFbrController.validateFbr
+);
+router.post(
+    '/:id/fbr/submit',
+    validateId,
+    requirePermission('invoice.fbr_mock_submit'),
+    invoiceFbrController.submitFbr
+);
 
 export default router;

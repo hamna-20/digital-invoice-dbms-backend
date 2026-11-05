@@ -59,7 +59,7 @@ const containsSecret = (payload) => {
 
 const run = async () => {
     const stamp = Date.now();
-    const email = `test.auth.${stamp}@example.test`;
+    const email = `test.auth.${stamp}@example.com`;
     const password = 'StrongPass!23';
 
     // ---------------------------------------------------------------- health
@@ -95,7 +95,7 @@ const run = async () => {
 
     // ------------------------------------------------------- 3. invalid email
     const badEmail = await request('POST', '/api/auth/signup', {
-        body: { fullName: 'Bad Email', email: 'not-an-email', password, confirmPassword: password },
+        body: { fullName: 'Bad Email', email: 'not-an-email@example.com', password, confirmPassword: password },
     });
     check('3. invalid email returns 400', badEmail.status === 400, `status=${badEmail.status}`);
     check('3a. error names the email field', JSON.stringify(badEmail.json?.errors ?? []).includes('email'));
@@ -112,14 +112,14 @@ const run = async () => {
 
     // ----------------------------------------------------- 5. password mismatch
     const mismatch = await request('POST', '/api/auth/signup', {
-        body: { fullName: 'Mismatch', email: `mismatch.${stamp}@example.test`, password, confirmPassword: 'DifferentPass!23' },
+        body: { fullName: 'Mismatch', email: `mismatch.${stamp}@example.com`, password, confirmPassword: 'DifferentPass!23' },
     });
     check('5. password mismatch returns 400', mismatch.status === 400, `status=${mismatch.status}`);
     check('5a. mismatch is attributed to confirmPassword', JSON.stringify(mismatch.json?.errors ?? []).includes('confirmPassword'));
 
     // ------------------------------------------------ 6. password below minimum
     const shortPassword = await request('POST', '/api/auth/signup', {
-        body: { fullName: 'Short Pw', email: `short.${stamp}@example.test`, password: 'Short1!', confirmPassword: 'Short1!' },
+        body: { fullName: 'Short Pw', email: `short.${stamp}@example.com`, password: 'Short1!', confirmPassword: 'Short1!' },
     });
     check('6. password shorter than 8 chars returns 400', shortPassword.status === 400, `status=${shortPassword.status}`);
     check('6a. error names the password field', JSON.stringify(shortPassword.json?.errors ?? []).includes('password'));
@@ -140,7 +140,7 @@ const run = async () => {
     check('8a. wrong password message is generic', wrongPassword.json?.message === 'Invalid email or password', `message=${wrongPassword.json?.message}`);
 
     // ---------------------------------------------------------- 9. unknown email
-    const unknownEmail = await request('POST', '/api/auth/signin', { body: { email: `nobody.${stamp}@example.test`, password } });
+    const unknownEmail = await request('POST', '/api/auth/signin', { body: { email: `nobody.${stamp}@example.com`, password } });
     check('9. unknown email returns 401', unknownEmail.status === 401, `status=${unknownEmail.status}`);
     check(
         '9a. unknown email message identical to wrong password (no enumeration)',
