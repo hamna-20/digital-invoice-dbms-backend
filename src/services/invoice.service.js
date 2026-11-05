@@ -19,10 +19,22 @@ import { buildFbrPayload as buildFbrPreviewPayload, validateInvoiceForFbr as val
  * Invoice business logic.
  *
  * Money rules (documented policy):
- *   lineSubtotal = round2(quantity x unitPrice)
- *   lineTax      = round2(lineSubtotal x taxRate / 100)
- *   lineTotal    = lineSubtotal + lineTax
- *   invoice      = sum of the rounded line values
+ *   lineSubtotal    = round2(quantity x unitPrice)
+ *   lineTax         = round2(lineSubtotal x taxRate / 100)
+ *   additionalTax   = extraTax + (furtherTax if buyer is unregistered/end user)
+ *                     + advanceTax + fedPayable (per product, FBR-applicable)
+ *   lineTotal       = lineSubtotal + lineTax + additionalTax
+ *   invoice         = sum of the rounded line values, less discount
+ *
+ * Further tax is only chargeable on sales to unregistered/end-consumer buyers;
+ * sales tax withheld at source only happens for registered buyers (it is part
+ * of the sales tax the buyer deposits directly to FBR, so it is reported but
+ * never added to the payable total). Extra/advance/FED apply wherever a
+ * product carries the rate (already zero for exempt lines).
+ *
+ * Rounding is ROUND_HALF_UP to 2 decimals and happens per line, so the line
+ * items always add up to the invoice totals exactly. All currency maths uses
+ * Prisma.Decimal (decimal.js); JavaScript floating point is never used.
  *
  * Rounding is ROUND_HALF_UP to 2 decimals and happens per line, so the line
  * items always add up to the invoice totals exactly. All currency maths uses
@@ -545,7 +557,7 @@ async function resolveProducts(userId, items) {
 async function assertCustomer(userId, customerId) {
     const customer = await prisma.customer.findFirst({
         where: { id: customerId, userId },
-        select: { id: true },
+        select: { id: true, registration: true },
     });
 
     if (!customer) {
@@ -553,6 +565,7 @@ async function assertCustomer(userId, customerId) {
             { field: 'customerId', message: 'Customer not found' },
         ]);
     }
+    return customer;
 }
 
 /**
@@ -561,7 +574,13 @@ async function assertCustomer(userId, customerId) {
  * value here, so a stale or tampered client total can never be persisted.
  * Anything not supplied falls back to the product's configured values.
  */
-function buildLines(productsById, items) {
+function buildLines(productsById, items, buyerRegistration) {
+    const registration = String(buyerRegistration ?? '').trim();
+    // Further tax is chargeable only on supplies to unregistered/end-consumer buyers.
+    const isUnregisteredBuyer = registration === 'Unregistered' || registration === 'End User';
+    // Sales tax withheld at source only happens when the buyer is registered.
+    const isRegisteredBuyer = registration === 'Registered';
+
     return items.map((item, index) => {
         const product = productsById.get(item.productId);
         const unitPrice =
@@ -574,7 +593,6 @@ function buildLines(productsById, items) {
                 : new Prisma.Decimal(item.taxRate);
         const lineSubtotal = round2(unitPrice.mul(item.quantity));
         const lineTax = round2(lineSubtotal.mul(taxRate).div(100));
-        const lineTotal = lineSubtotal.add(lineTax);
 
         // A discount is an amount off the line, never more than the line's
         // own sales value. It reduces the invoice grand total below.
@@ -592,12 +610,15 @@ function buildLines(productsById, items) {
         }
 
         /**
-         * FBR-style memo components. They are percentages of the line sales
-         * value excluding sales tax, and are stored/displayed only: the
-         * existing invoice total remains subtotal + sales tax less discount,
-         * so adding these rates never changes money that was already
-         * calculated. Whether any component should affect the payable total is
-         * an accountant decision.
+         * FBR additional tax components, applied per line and included in the
+         * payable total (except withheld at source, which is part of the sales
+         * tax the registered buyer deposits directly to FBR):
+         *   extraTax    - where notified (product rate > 0)
+         *   furtherTax  - only unregistered / end-consumer buyers
+         *   advanceTax  - where applicable (product rate > 0)
+         *   fedPayable  - excisable goods (product rate > 0)
+         * Components for which the buyer is not liable are stored as 0 so the
+         * FBR payload never reports a non-applicable tax.
          */
         const percentage = (rate) => round2(lineSubtotal.mul(new Prisma.Decimal(rate ?? 0)).div(100));
 
@@ -605,6 +626,19 @@ function buildLines(productsById, items) {
             value === undefined || value === null ? fallback ?? 0 : value;
         const textOr = (value, fallback) =>
             value === undefined || value === null ? fallback ?? null : value;
+
+        const extraTax = percentage(rateOr(item.extraTaxRate, product.extraTaxRate));
+        const furtherTax = isUnregisteredBuyer
+            ? percentage(rateOr(item.furtherTaxRate, product.furtherTaxRate))
+            : DECIMAL_ZERO;
+        const advanceTax = percentage(rateOr(item.advanceTaxRate, product.advanceTaxRate));
+        const fedPayable = percentage(rateOr(item.fedRate, product.fedRate));
+        const salesTaxWithheldAtSource = isRegisteredBuyer
+            ? percentage(rateOr(item.salesTaxWithheldRate, product.salesTaxWithheldRate))
+            : DECIMAL_ZERO;
+
+        const additionalTax = extraTax.add(furtherTax).add(advanceTax).add(fedPayable);
+        const lineTotal = lineSubtotal.add(lineTax).add(additionalTax);
 
         return {
             productId: product.id,
@@ -622,13 +656,11 @@ function buildLines(productsById, items) {
             saleType: textOr(item.saleType, product.saleType),
             sroScheduleNo: textOr(item.sroScheduleNo, product.sroScheduleNo),
             sroItemSerialNo: textOr(item.sroItemSerialNo, product.sroItemSerialNo),
-            extraTax: percentage(rateOr(item.extraTaxRate, product.extraTaxRate)),
-            furtherTax: percentage(rateOr(item.furtherTaxRate, product.furtherTaxRate)),
-            advanceTax: percentage(rateOr(item.advanceTaxRate, product.advanceTaxRate)),
-            fedPayable: percentage(rateOr(item.fedRate, product.fedRate)),
-            salesTaxWithheldAtSource: percentage(
-                rateOr(item.salesTaxWithheldRate, product.salesTaxWithheldRate)
-            ),
+            extraTax,
+            furtherTax,
+            advanceTax,
+            fedPayable,
+            salesTaxWithheldAtSource,
             discount,
         };
     });
@@ -637,6 +669,13 @@ function buildLines(productsById, items) {
 function sumTotals(lines) {
     const subtotal = lines.reduce((sum, line) => sum.add(line.lineSubtotal), DECIMAL_ZERO);
     const taxTotal = lines.reduce((sum, line) => sum.add(line.lineTax), DECIMAL_ZERO);
+    // FBR additional taxes carried on the lines (further/extra/advance/FED)
+    // are part of the buyer's payable amount.
+    const additionalTaxTotal = lines.reduce(
+        (sum, line) =>
+            sum.add(line.extraTax).add(line.furtherTax).add(line.advanceTax).add(line.fedPayable),
+        DECIMAL_ZERO
+    );
     // Line discount is a reduction of the line total and therefore of the
     // invoice's grand total. It is stored at line level and aggregated here,
     // keeping the existing per-line rounding policy.
@@ -645,9 +684,12 @@ function sumTotals(lines) {
     return {
         subtotal: round2(subtotal),
         taxTotal: round2(taxTotal),
+        additionalTaxTotal: round2(additionalTaxTotal),
         discount: round2(discount),
-        // Grand total is subtotal + sales tax, less the total discount.
-        grandTotal: round2(subtotal.add(taxTotal).sub(discount)),
+        // Grand total = ex-ST value + sales tax + applicable additional taxes,
+        // less the total discount. Withheld-at-source ST is never added: it is
+        // part of the sales tax the buyer deposits directly to FBR.
+        grandTotal: round2(subtotal.add(taxTotal).add(additionalTaxTotal).sub(discount)),
     };
 }
 
@@ -697,10 +739,10 @@ function visibleTo(actor) {
 
 export async function createInvoice(actor, input) {
     const userId = actor.id;
-    await assertCustomer(userId, input.customerId);
+    const customer = await assertCustomer(userId, input.customerId);
 
     const productsById = await resolveProducts(userId, input.items);
-    const lines = buildLines(productsById, input.items);
+    const lines = buildLines(productsById, input.items, customer?.registration);
     const totals = sumTotals(lines);
 
     const invoice = await prisma.$transaction(async (tx) => {
@@ -1047,23 +1089,18 @@ export async function fbrPreview(actor, id) {
         businessProvince: businessProfile?.province ?? userRow?.businessProvince ?? null,
     };
 
-    // Create FBR client - will throw 'FBR reference data not configured' if token not set
+    // HS existence is checked against the local reference table (works offline);
+    // UOMs come from FBR when configured, otherwise UOM gating is skipped.
     const fbrClient = {
         isValidHsCode: async (code) => {
-            if (!process.env.FBR_TOKEN) {
-                return true; // Skip validation, will be handled in product service
-            }
             try {
                 const { isValidHsCode } = await import('../services/fbr.reference.js');
                 return await isValidHsCode(code);
             } catch {
-                return true; // Allow save with warning if check fails
+                return true; // Allow save with warning if the check fails
             }
         },
         getAllowedUOMs: async (hsCode) => {
-            if (!process.env.FBR_TOKEN) {
-                return []; // Skip validation, will be handled in product service
-            }
             try {
                 const { getAllowedUOMs } = await import('../services/fbr.reference.js');
                 return await getAllowedUOMs(hsCode);
@@ -1073,7 +1110,7 @@ export async function fbrPreview(actor, id) {
         },
     };
 
-    const errors = validateInvoiceForFbrRules({ user: userForValidation, invoice: { customer: buyer, items }, fbrClient });
+    const errors = validateInvoiceForFbrRules({ user: userForValidation, invoice: { customer: buyer, items, grandTotal: invoice.grandTotal }, fbrClient });
 
     const payload = buildFbrPreviewPayload(
         {
@@ -1105,6 +1142,8 @@ export async function updateInvoice(actor, id, input) {
             dueDate: true,
             invoiceNumber: true,
             grandTotal: true,
+            customerId: true,
+            customer: { select: { registration: true } },
             items: { select: { productId: true, quantity: true } },
             payments: { select: { amount: true, status: true } },
             creditNotes: { select: { appliedAmount: true, returnId: true } },
@@ -1124,8 +1163,10 @@ export async function updateInvoice(actor, id, input) {
         throw statusConflict('edit', before.status);
     }
 
+    let buyerRegistration = existing.customer?.registration ?? null;
     if (input.customerId !== undefined) {
-        await assertCustomer(userId, input.customerId);
+        const customer = await assertCustomer(userId, input.customerId);
+        buyerRegistration = customer?.registration ?? null;
     }
 
     // Validate the effective date pair, which may mix new and stored values.
@@ -1142,7 +1183,7 @@ export async function updateInvoice(actor, id, input) {
 
     if (input.items !== undefined) {
         const productsById = await resolveProducts(userId, input.items);
-        lines = buildLines(productsById, input.items);
+        lines = buildLines(productsById, input.items, buyerRegistration);
         totals = sumTotals(lines);
     }
 

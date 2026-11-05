@@ -320,6 +320,18 @@ export function validateInvoiceForFbr({ invoice, seller = {} }) {
             'Buyer STRN is missing. Add it if the buyer is registered for sales tax.'
         );
     }
+    // FBR requires the buyer's CNIC on end-consumer sales of Rs. 100,000 or more.
+    if (
+        customer.registration === 'End User' &&
+        isBlank(customer.taxNumber) &&
+        toNumber(invoice?.grandTotal) >= 100000
+    ) {
+        error(
+            SOURCE.CUSTOMER,
+            'customer.taxNumber',
+            'Buyer CNIC is required for end-consumer sales of Rs. 100,000 or more.'
+        );
+    }
 
     // ------------------------------- Invoice ------------------------------
     if (isBlank(invoice?.invoiceNumber)) {

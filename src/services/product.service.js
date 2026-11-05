@@ -74,7 +74,8 @@ export async function createProduct(userId, input) {
             if (input.unit && input.hsCode) {
                 try {
                     const allowedUOMs = await getAllowedUOMs(input.hsCode);
-                    if (!allowedUOMs.includes(input.unit)) {
+                    const allowedLower = allowedUOMs.map((uom) => String(uom).trim().toLowerCase());
+                    if (!allowedLower.includes(String(input.unit).trim().toLowerCase())) {
                         throw ApiError.badRequest(`Unit must be one of: ${allowedUOMs.join(', ')}`);
                     }
                 } catch (error) {
@@ -194,7 +195,8 @@ export async function updateProduct(userId, id, input) {
             if (input.unit && input.hsCode) {
                 try {
                     const allowedUOMs = await getAllowedUOMs(input.hsCode);
-                    if (!allowedUOMs.includes(input.unit)) {
+                    const allowedLower = allowedUOMs.map((uom) => String(uom).trim().toLowerCase());
+                    if (!allowedLower.includes(String(input.unit).trim().toLowerCase())) {
                         throw ApiError.badRequest(`Unit must be one of: ${allowedUOMs.join(', ')}`);
                     }
                 } catch (error) {

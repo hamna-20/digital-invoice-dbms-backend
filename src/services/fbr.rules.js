@@ -211,6 +211,20 @@ export function validateInvoiceForFbr({ user = {}, invoice = {}, fbrClient = nul
         errors.push({ field: 'buyer.' + e.field.split('.')[1], message: e.message });
     }
 
+    // End consumer: CNIC mandatory on sales of Rs. 100,000 or more.
+    const grandTotalNumber = Number(invoice?.grandTotal ?? 0);
+    if (
+        String(buyer?.registration ?? '').trim() === 'End User' &&
+        isBlank(buyer?.taxNumber) &&
+        Number.isFinite(grandTotalNumber) &&
+        grandTotalNumber >= 100000
+    ) {
+        errors.push({
+            field: 'buyer.taxNumber',
+            message: 'Buyer CNIC is required for end-consumer sales of Rs. 100,000 or more.',
+        });
+    }
+
     const items = invoice?.items;
     if (!Array.isArray(items) || items.length === 0) {
         errors.push({ field: 'items', message: 'At least one invoice item is required.' });

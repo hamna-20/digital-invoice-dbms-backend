@@ -721,7 +721,7 @@ Run `npm run prisma:generate` and restart the API after changing `schema.prisma`
 
 **`ReferenceError` or `P2003`/CHECK constraint errors on payments or returns**
 A write is using a value the database rejects, such as an audit `documentType` outside the allowed list, or a foreign key that points to a missing row. Read the Prisma error code and `meta` in the server log, then correct the value. Do not drop constraints.
-
+//
 **Browser requests fail with CORS**
 Add the exact frontend origin, with scheme and port and no trailing slash, to `CORS_ORIGINS`, then restart.
 

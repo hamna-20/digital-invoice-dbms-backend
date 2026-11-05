@@ -7,6 +7,7 @@ import productRoutes from './product.routes.js';
 import reportRoutes from './report.routes.js';
 import financialRoutes from './financial.routes.js';
 import businessProfileRoutes from './businessProfile.routes.js';
+import referenceRoutes from './reference.routes.js';
 
 const router = express.Router();
 
@@ -34,6 +35,7 @@ router.use('/reports', reportRoutes);
 router.use('/dashboard', dashboardRoutes);
 router.use('/', financialRoutes);
 router.use('/seller', businessProfileRoutes);
+router.use('/reference', referenceRoutes);
 
 
 export default router;
